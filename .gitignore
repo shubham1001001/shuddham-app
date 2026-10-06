@@ -44,6 +44,10 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 /android/local.properties
-/android/.gradle/
 .flutter-plugins
 .flutter-plugins-dependencies
+.packages
+android/.gradle
+ios/Pods/
+ios/.symlinks/
+
