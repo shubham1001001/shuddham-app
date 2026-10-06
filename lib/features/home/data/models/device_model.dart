@@ -1,0 +1,77 @@
+import '../../domain/entities/device_entity.dart';
+
+class DeviceModel extends DeviceEntity {
+  const DeviceModel({
+    required super.id,
+    required super.name,
+    required super.model,
+    required super.type,
+    required super.serialNumber,
+    required super.location,
+    super.isOnline = true,
+    super.tdsPpm = 85,
+    super.filterLifePercentage = 85,
+    super.lastSync = 'Just now',
+    super.totalLitersPurified = 142.5,
+  });
+
+  factory DeviceModel.fromJson(Map<String, dynamic> json) {
+    return DeviceModel(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      model: json['model'] as String? ?? 'Shuddham Smart RO',
+      type: json['type'] as String? ?? 'RO Purifier',
+      serialNumber: json['serialNumber'] as String? ?? 'SHD-RO-2024',
+      location: json['location'] as String? ?? 'Kitchen',
+      isOnline: json['isOnline'] as bool? ?? true,
+      tdsPpm: json['tdsPpm'] as int? ?? 85,
+      filterLifePercentage: json['filterLifePercentage'] as int? ?? 85,
+      lastSync: json['lastSync'] as String? ?? 'Just now',
+      totalLitersPurified: (json['totalLitersPurified'] as num?)?.toDouble() ?? 142.5,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'model': model,
+      'type': type,
+      'serialNumber': serialNumber,
+      'location': location,
+      'isOnline': isOnline,
+      'tdsPpm': tdsPpm,
+      'filterLifePercentage': filterLifePercentage,
+      'lastSync': lastSync,
+      'totalLitersPurified': totalLitersPurified,
+    };
+  }
+
+  DeviceModel copyWith({
+    String? id,
+    String? name,
+    String? model,
+    String? type,
+    String? serialNumber,
+    String? location,
+    bool? isOnline,
+    int? tdsPpm,
+    int? filterLifePercentage,
+    String? lastSync,
+    double? totalLitersPurified,
+  }) {
+    return DeviceModel(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      model: model ?? this.model,
+      type: type ?? this.type,
+      serialNumber: serialNumber ?? this.serialNumber,
+      location: location ?? this.location,
+      isOnline: isOnline ?? this.isOnline,
+      tdsPpm: tdsPpm ?? this.tdsPpm,
+      filterLifePercentage: filterLifePercentage ?? this.filterLifePercentage,
+      lastSync: lastSync ?? this.lastSync,
+      totalLitersPurified: totalLitersPurified ?? this.totalLitersPurified,
+    );
+  }
+}
