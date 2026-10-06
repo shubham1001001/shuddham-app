@@ -54,35 +54,7 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
     'Office',
   ];
 
-  final List<Map<String, dynamic>> _radarDevices = [
-    {
-      'id': 'SHD-RO-BLE-101',
-      'name': 'Shuddham Smart RO Pro',
-      'model': 'RO-7S IoT Edition',
-      'type': 'RO Purifier',
-      'signal': 98,
-      'location': 'Kitchen',
-      'tds': 78,
-    },
-    {
-      'id': 'SHD-TS-BLE-202',
-      'name': 'Overhead Tank Purity Sensor',
-      'model': 'IoT Purity Monitor v2',
-      'type': 'Tank Sensor',
-      'signal': 85,
-      'location': 'Rooftop Tank',
-      'tds': 112,
-    },
-    {
-      'id': 'SHD-TDS-BLE-303',
-      'name': 'Inline Tap TDS Meter',
-      'model': 'Micro TDS Sensor',
-      'type': 'TDS Meter',
-      'signal': 72,
-      'location': 'Utility Room',
-      'tds': 92,
-    },
-  ];
+  final List<Map<String, dynamic>> _radarDevices = [];
 
   @override
   void initState() {
