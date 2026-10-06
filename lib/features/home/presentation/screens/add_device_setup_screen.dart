@@ -157,37 +157,50 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Single
               _errorMessage = 'Bluetooth permission is permanently denied. Please enable it in App Settings.';
             });
           }
+          await openAppSettings();
           return;
         }
       }
 
-      // Check adapter state
+      // Check current adapter state
       BluetoothAdapterState adapterState = await FlutterBluePlus.adapterState.first;
       if (adapterState != BluetoothAdapterState.on) {
         if (Platform.isAndroid) {
           try {
+            // Triggers native Android system popup: "Allow Shuddham to turn on Bluetooth?"
             await FlutterBluePlus.turnOn();
-          } catch (_) {}
+          } catch (e) {
+            debugPrint('FlutterBluePlus.turnOn error: $e');
+          }
         }
-        // Wait a moment for Bluetooth to activate
-        await Future.delayed(const Duration(milliseconds: 800));
-        adapterState = await FlutterBluePlus.adapterState.first;
+
+        // Wait up to 6 seconds for Bluetooth to turn on
+        int retries = 0;
+        while (retries < 12) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          adapterState = await FlutterBluePlus.adapterState.first;
+          if (adapterState == BluetoothAdapterState.on) break;
+          retries++;
+        }
       }
 
       if (adapterState != BluetoothAdapterState.on) {
         if (mounted) {
           setState(() {
-            _errorMessage = 'Please turn ON your phone Bluetooth to scan for purifiers.';
+            _isBluetoothEnabled = false;
+            _errorMessage = 'Bluetooth is OFF. Please turn ON Bluetooth to find nearby purifiers.';
           });
         }
         return;
       }
 
-      setState(() {
-        _isBluetoothEnabled = true;
-        _currentStep = SetupStep.radarScanning;
-        _discoveredResults = [];
-      });
+      if (mounted) {
+        setState(() {
+          _isBluetoothEnabled = true;
+          _currentStep = SetupStep.radarScanning;
+          _discoveredResults = [];
+        });
+      }
 
       _startRealBleScan();
     } catch (e) {
