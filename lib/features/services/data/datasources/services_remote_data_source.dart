@@ -1,8 +1,6 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import '../../../../core/constants/api_endpoints.dart';
+import '../../../../core/error/exceptions.dart';
+import '../../../../core/network/api_client.dart';
 import '../models/water_service_model.dart';
 
 /// Exception class for Services API errors.
@@ -23,69 +21,29 @@ abstract class ServicesRemoteDataSource {
   Future<WaterServiceModel> getServiceById(String id);
 }
 
-/// Concrete implementation that hits the Shuddham backend API.
-/// Uses the same multi-endpoint fallback strategy as [AuthRemoteDataSourceImpl].
+/// Concrete implementation that hits the Shuddham backend API via ApiClient.
 class ServicesRemoteDataSourceImpl implements ServicesRemoteDataSource {
-  final List<String> _baseUrls = ApiEndpoints.allBaseUrls;
+  final ApiClient apiClient;
 
-  /// Helper: HTTP GET with automatic fallback across all backend URLs.
+  ServicesRemoteDataSourceImpl({ApiClient? apiClient})
+      : apiClient = apiClient ?? ApiClient();
+
+  /// Helper: HTTP GET via ApiClient
   Future<Map<String, dynamic>> _httpGet(String endpoint) async {
-    for (final baseUrl in _baseUrls) {
-      HttpClient? client;
-      try {
-        final uri = Uri.parse('$baseUrl$endpoint');
-        debugPrint('📡 [Services API] GET $uri');
-
-        client = HttpClient()..connectionTimeout = const Duration(seconds: 45);
-        final request = await client.getUrl(uri).timeout(const Duration(seconds: 45));
-        request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-
-        final response = await request.close().timeout(const Duration(seconds: 45));
-        final responseBody = await response.transform(utf8.decoder).join();
-
-        debugPrint('📥 [Services API] Status ${response.statusCode} from $uri');
-
-        if (responseBody.isNotEmpty) {
-          final json = jsonDecode(responseBody) as Map<String, dynamic>;
-          if (response.statusCode >= 200 && response.statusCode < 300) {
-            debugPrint('✅ [Services API] Success via $baseUrl');
-            client.close(force: true);
-            return json;
-          } else {
-            final msg = json['message'] as String? ?? 'Error: ${response.statusCode}';
-            debugPrint('❌ [Services API] Error ${response.statusCode}: $msg');
-            client.close(force: true);
-            throw ServicesApiException(msg);
-          }
-        }
-      } on ServicesApiException {
-        client?.close(force: true);
-        rethrow;
-      } on SocketException catch (e) {
-        debugPrint('⚠️ [Services API] $baseUrl unreachable: ${e.message}. Trying next...');
-        continue;
-      } on HttpException catch (e) {
-        debugPrint('⚠️ [Services API] $baseUrl HTTP error: ${e.message}. Trying next...');
-        continue;
-      } on TimeoutException {
-        debugPrint('⚠️ [Services API] $baseUrl timed out. Trying next...');
-        continue;
-      } on HandshakeException catch (e) {
-        debugPrint('⚠️ [Services API] $baseUrl SSL error: ${e.message}. Trying next...');
-        continue;
-      } catch (e) {
-        if (e is ServicesApiException) rethrow;
-        debugPrint('⚠️ [Services API] $baseUrl exception: $e');
-        continue;
-      } finally {
-        client?.close(force: true);
+    try {
+      final res = await apiClient.get(endpoint);
+      if (res is Map<String, dynamic>) {
+        return res;
       }
+      throw ServicesApiException('Unexpected response format received from server.');
+    } on ServerException catch (e) {
+      throw ServicesApiException(e.message);
+    } on NetworkException catch (e) {
+      throw ServicesApiException(e.message);
+    } catch (e) {
+      if (e is ServicesApiException) rethrow;
+      throw ServicesApiException(e.toString());
     }
-
-    debugPrint('❌ [Services API] All backend endpoints failed.');
-    throw ServicesApiException(
-      'Unable to load services. Please check your internet connection and try again.',
-    );
   }
 
   @override

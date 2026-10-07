@@ -1,8 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import '../../../../core/constants/api_endpoints.dart';
+import '../../../../core/error/exceptions.dart';
+import '../../../../core/network/api_client.dart';
 import '../models/user_model.dart';
 
 class ApiException implements Exception {
@@ -37,70 +36,32 @@ abstract class AuthRemoteDataSource {
     required String email,
     required String newPassword,
   });
+
+  Future<void> signOut({String? token});
 }
 
 class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
-  final List<String> _baseUrls = ApiEndpoints.allBaseUrls;
+  final ApiClient apiClient;
 
-  /// Helper to send HTTP POST request to backend with automatic fallback endpoints
+  AuthRemoteDataSourceImpl({ApiClient? apiClient})
+      : apiClient = apiClient ?? ApiClient();
+
+  /// Helper to send HTTP POST request to backend via ApiClient
   Future<Map<String, dynamic>> _httpPost(String endpoint, Map<String, dynamic> body) async {
-    for (final baseUrl in _baseUrls) {
-      HttpClient? client;
-      try {
-        final uri = Uri.parse('$baseUrl$endpoint');
-        debugPrint('📡 [API Request] POST $uri');
-        debugPrint('   Payload: ${jsonEncode(body)}');
-
-        client = HttpClient()..connectionTimeout = const Duration(seconds: 45);
-        final request = await client.postUrl(uri).timeout(const Duration(seconds: 45));
-        request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-        request.add(utf8.encode(jsonEncode(body)));
-
-        final response = await request.close().timeout(const Duration(seconds: 45));
-        final responseBody = await response.transform(utf8.decoder).join();
-
-        debugPrint('📥 [API Response] Status ${response.statusCode} from $uri');
-        debugPrint('   Body: $responseBody');
-
-        if (responseBody.isNotEmpty) {
-          final json = jsonDecode(responseBody) as Map<String, dynamic>;
-          if (response.statusCode >= 200 && response.statusCode < 300) {
-            debugPrint('✅ [API Success] Request succeeded via $baseUrl');
-            client.close(force: true);
-            return json;
-          } else {
-            final msg = json['message'] as String? ?? 'Error: ${response.statusCode}';
-            debugPrint('❌ [API Error] Status ${response.statusCode}: $msg');
-            client.close(force: true);
-            throw ApiException(msg);
-          }
-        }
-      } on ApiException {
-        client?.close(force: true);
-        rethrow;
-      } on SocketException catch (e) {
-        debugPrint('⚠️ [API Network] $baseUrl unreachable: ${e.message}. Trying next candidate...');
-        continue;
-      } on HttpException catch (e) {
-        debugPrint('⚠️ [API HTTP] $baseUrl error: ${e.message}. Trying next candidate...');
-        continue;
-      } on TimeoutException {
-        debugPrint('⚠️ [API Timeout] $baseUrl timed out. Render may be waking up...');
-        continue;
-      } on HandshakeException catch (e) {
-        debugPrint('⚠️ [API SSL] $baseUrl SSL handshake failed: ${e.message}. Trying next candidate...');
-        continue;
-      } catch (e) {
-        if (e is ApiException) rethrow;
-        debugPrint('⚠️ [API Error] $baseUrl exception: $e');
-        continue;
-      } finally {
-        client?.close(force: true);
+    try {
+      final res = await apiClient.post(endpoint, body: body);
+      if (res is Map<String, dynamic>) {
+        return res;
       }
+      throw ApiException('Unexpected response format received from server.');
+    } on ServerException catch (e) {
+      throw ApiException(e.message);
+    } on NetworkException catch (e) {
+      throw ApiException(e.message);
+    } catch (e) {
+      if (e is ApiException) rethrow;
+      throw ApiException(e.toString());
     }
-
-    debugPrint('❌ [API Network Error] All backend endpoints failed to respond.');
-    throw ApiException('Unable to connect to Shuddham server. Please check your internet connection and try again.');
   }
 
   @override
@@ -201,6 +162,15 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       'newPassword': newPassword,
     });
     return json['message'] as String? ?? 'Password reset successfully.';
+  }
+
+  @override
+  Future<void> signOut({String? token}) async {
+    try {
+      await apiClient.post(ApiEndpoints.logout, token: token);
+    } catch (_) {
+      // Graceful fallback: local logout proceeds even if network error occurs
+    }
   }
 }
 

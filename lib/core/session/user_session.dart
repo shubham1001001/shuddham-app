@@ -15,7 +15,7 @@ class UserSession extends ChangeNotifier {
 
   UserEntity? get currentUser => _currentUser;
   String get phoneNumber => _phoneNumber;
-  String get rawPhone => _extractDigits(_phoneNumber);
+  String get rawPhone => extract10Digits(_phoneNumber.isNotEmpty ? _phoneNumber : (_currentUser?.phone ?? ''));
   String get userName => _userName;
   String get email => _email;
   String get token => _currentUser?.token ?? _token;
@@ -66,6 +66,22 @@ class UserSession extends ChangeNotifier {
   /// Helper to extract only numeric digits
   static String _extractDigits(String text) {
     return text.replaceAll(RegExp(r'\D'), '');
+  }
+
+  /// Helper to extract clean 10-digit Indian phone number (strips +91, 91, or leading 0)
+  static String extract10Digits(String? text) {
+    if (text == null || text.isEmpty) return '';
+    final digits = _extractDigits(text);
+    if (digits.length == 12 && digits.startsWith('91')) {
+      return digits.substring(2);
+    }
+    if (digits.length == 11 && digits.startsWith('0')) {
+      return digits.substring(1);
+    }
+    if (digits.length > 10) {
+      return digits.substring(digits.length - 10);
+    }
+    return digits;
   }
 
   /// Format phone numbers into standard Indian format (+91 XXXXX XXXXX)

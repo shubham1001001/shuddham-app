@@ -7,7 +7,8 @@ import '../datasources/services_remote_data_source.dart';
 class ServicesRepositoryImpl implements ServicesRepository {
   final ServicesRemoteDataSource remoteDataSource;
 
-  ServicesRepositoryImpl({required this.remoteDataSource});
+  ServicesRepositoryImpl({ServicesRemoteDataSource? remoteDataSource})
+      : remoteDataSource = remoteDataSource ?? ServicesRemoteDataSourceImpl();
 
   @override
   Future<List<WaterServiceEntity>> getServices({String? category}) {

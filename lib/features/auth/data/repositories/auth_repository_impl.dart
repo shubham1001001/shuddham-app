@@ -5,7 +5,8 @@ import '../datasources/auth_remote_data_source.dart';
 class AuthRepositoryImpl implements AuthRepository {
   final AuthRemoteDataSource remoteDataSource;
 
-  AuthRepositoryImpl({required this.remoteDataSource});
+  AuthRepositoryImpl({AuthRemoteDataSource? remoteDataSource})
+      : remoteDataSource = remoteDataSource ?? AuthRemoteDataSourceImpl();
 
   @override
   Future<UserEntity> signIn({
@@ -57,5 +58,10 @@ class AuthRepositoryImpl implements AuthRepository {
       email: email,
       newPassword: newPassword,
     );
+  }
+
+  @override
+  Future<void> signOut({String? token}) {
+    return remoteDataSource.signOut(token: token);
   }
 }

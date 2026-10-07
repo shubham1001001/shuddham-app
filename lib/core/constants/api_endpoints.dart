@@ -62,6 +62,15 @@ class ApiEndpoints {
   static const String changePassword = '/auth/change-password';
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // 📍 ADDRESSES — Customer Saved Addresses (CRUD)
+  // ═══════════════════════════════════════════════════════════════════════════
+  /// GET / POST — Customer saved addresses
+  static const String customerAddresses = '/customer/addresses';
+
+  /// General addresses endpoint alias
+  static const String addresses = '/addresses';
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // 🛡️ AUTH — Admin Authentication (Web Portal)
   // ═══════════════════════════════════════════════════════════════════════════
   /// POST — Admin/Staff sign in (strict role check)

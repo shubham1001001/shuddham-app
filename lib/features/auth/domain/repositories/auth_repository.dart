@@ -24,4 +24,6 @@ abstract class AuthRepository {
     required String email,
     required String newPassword,
   });
+
+  Future<void> signOut({String? token});
 }

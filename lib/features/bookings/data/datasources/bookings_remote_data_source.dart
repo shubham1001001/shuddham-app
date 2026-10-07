@@ -1,8 +1,6 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import '../../../../core/constants/api_endpoints.dart';
+import '../../../../core/error/exceptions.dart';
+import '../../../../core/network/api_client.dart';
 import '../models/booking_model.dart';
 
 /// Exception class for Bookings API errors.
@@ -30,92 +28,38 @@ abstract class BookingsRemoteDataSource {
 }
 
 /// Concrete implementation hitting the Shuddham backend API.
-/// Uses multi-endpoint fallback strategy.
 class BookingsRemoteDataSourceImpl implements BookingsRemoteDataSource {
-  final List<String> _baseUrls = ApiEndpoints.allBaseUrls;
+  final ApiClient apiClient;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // HTTP Helpers (GET & POST with multi-URL fallback)
-  // ─────────────────────────────────────────────────────────────────────────
+  BookingsRemoteDataSourceImpl({ApiClient? apiClient})
+      : apiClient = apiClient ?? ApiClient();
 
-  Future<Map<String, dynamic>> _httpRequest(
+  Future<Map<String, dynamic>> _send(
     String method,
     String endpoint, {
     Map<String, dynamic>? body,
     String? token,
   }) async {
-    for (final baseUrl in _baseUrls) {
-      HttpClient? client;
-      try {
-        final uri = Uri.parse('$baseUrl$endpoint');
-        debugPrint('📡 [Bookings API] $method $uri');
-        if (body != null) debugPrint('   Payload: ${jsonEncode(body)}');
-
-        client = HttpClient()..connectionTimeout = const Duration(seconds: 45);
-
-        late HttpClientRequest request;
-        if (method == 'GET') {
-          request = await client.getUrl(uri).timeout(const Duration(seconds: 45));
-          request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-          if (token != null && token.isNotEmpty) {
-            request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-          }
-        } else {
-          request = await client.postUrl(uri).timeout(const Duration(seconds: 45));
-          request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-          request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-          if (token != null && token.isNotEmpty) {
-            request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
-          }
-          request.add(utf8.encode(jsonEncode(body ?? {})));
-        }
-
-        final response = await request.close().timeout(const Duration(seconds: 45));
-        final responseBody = await response.transform(utf8.decoder).join();
-
-        debugPrint('📥 [Bookings API] Status ${response.statusCode} from $uri');
-
-        if (responseBody.isNotEmpty) {
-          final json = jsonDecode(responseBody) as Map<String, dynamic>;
-          if (response.statusCode >= 200 && response.statusCode < 300) {
-            debugPrint('✅ [Bookings API] Success via $baseUrl');
-            client.close(force: true);
-            return json;
-          } else {
-            final msg = json['message'] as String? ?? 'Error: ${response.statusCode}';
-            debugPrint('❌ [Bookings API] Error ${response.statusCode}: $msg');
-            client.close(force: true);
-            throw BookingsApiException(msg);
-          }
-        }
-      } on BookingsApiException {
-        client?.close(force: true);
-        rethrow;
-      } on SocketException catch (e) {
-        debugPrint('⚠️ [Bookings API] $baseUrl unreachable: ${e.message}. Trying next...');
-        continue;
-      } on HttpException catch (e) {
-        debugPrint('⚠️ [Bookings API] $baseUrl HTTP error: ${e.message}. Trying next...');
-        continue;
-      } on TimeoutException {
-        debugPrint('⚠️ [Bookings API] $baseUrl timed out. Trying next...');
-        continue;
-      } on HandshakeException catch (e) {
-        debugPrint('⚠️ [Bookings API] $baseUrl SSL error: ${e.message}. Trying next...');
-        continue;
-      } catch (e) {
-        if (e is BookingsApiException) rethrow;
-        debugPrint('⚠️ [Bookings API] $baseUrl exception: $e');
-        continue;
-      } finally {
-        client?.close(force: true);
+    try {
+      dynamic res;
+      if (method == 'POST') {
+        res = await apiClient.post(endpoint, body: body, token: token);
+      } else {
+        res = await apiClient.get(endpoint, token: token);
       }
-    }
 
-    debugPrint('❌ [Bookings API] All backend endpoints failed.');
-    throw BookingsApiException(
-      'Unable to reach booking service. Please check your internet connection.',
-    );
+      if (res is Map<String, dynamic>) {
+        return res;
+      }
+      throw BookingsApiException('Unexpected response format received from server.');
+    } on ServerException catch (e) {
+      throw BookingsApiException(e.message);
+    } on NetworkException catch (e) {
+      throw BookingsApiException(e.message);
+    } catch (e) {
+      if (e is BookingsApiException) rethrow;
+      throw BookingsApiException(e.toString());
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -135,7 +79,7 @@ class BookingsRemoteDataSourceImpl implements BookingsRemoteDataSource {
     final queryStr = params.isNotEmpty ? '?${params.join('&')}' : '';
     final endpoint = '${ApiEndpoints.bookings}$queryStr';
 
-    final json = await _httpRequest('GET', endpoint);
+    final json = await _send('GET', endpoint);
 
     final dataList = json['data'] as List<dynamic>? ?? [];
     return dataList
@@ -153,7 +97,7 @@ class BookingsRemoteDataSourceImpl implements BookingsRemoteDataSource {
     final queryStr = params.isNotEmpty ? '?${params.join('&')}' : '';
     final endpoint = '${ApiEndpoints.customerBookings}$queryStr';
 
-    final json = await _httpRequest('GET', endpoint, token: token);
+    final json = await _send('GET', endpoint, token: token);
 
     final dataList = json['data'] as List<dynamic>? ?? [];
     return dataList
@@ -163,14 +107,14 @@ class BookingsRemoteDataSourceImpl implements BookingsRemoteDataSource {
 
   @override
   Future<BookingModel> getBookingById(String id) async {
-    final json = await _httpRequest('GET', ApiEndpoints.bookingById(id));
+    final json = await _send('GET', ApiEndpoints.bookingById(id));
     final data = json['data'] as Map<String, dynamic>;
     return BookingModel.fromJson(data);
   }
 
   @override
   Future<BookingModel> createBooking(Map<String, dynamic> body, {String? token}) async {
-    final json = await _httpRequest('POST', ApiEndpoints.createBooking, body: body, token: token);
+    final json = await _send('POST', ApiEndpoints.createBooking, body: body, token: token);
     final data = json['data'] as Map<String, dynamic>;
     return BookingModel.fromJson(data);
   }

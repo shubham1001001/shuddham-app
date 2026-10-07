@@ -8,7 +8,8 @@ import '../models/booking_model.dart';
 class BookingsRepositoryImpl implements BookingsRepository {
   final BookingsRemoteDataSource remoteDataSource;
 
-  BookingsRepositoryImpl({required this.remoteDataSource});
+  BookingsRepositoryImpl({BookingsRemoteDataSource? remoteDataSource})
+      : remoteDataSource = remoteDataSource ?? BookingsRemoteDataSourceImpl();
 
   @override
   Future<List<BookingEntity>> getBookings({String? status, String? customerPhone}) {

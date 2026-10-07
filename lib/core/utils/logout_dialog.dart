@@ -2,10 +2,14 @@ import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../session/user_session.dart';
 import '../../features/auth/presentation/screens/auth_screen.dart';
+import '../../features/auth/domain/usecases/logout_usecase.dart';
+import '../../features/auth/data/repositories/auth_repository_impl.dart';
 
 /// Shows a standardized confirmation dialog for logging out of the app.
-/// Navigates back to [AuthScreen] upon user confirmation, clearing the navigation stack.
-Future<void> showLogoutDialog(BuildContext context) async {
+/// Invalidation API call is dispatched to the backend, session cleared, and returns to [AuthScreen].
+Future<void> showLogoutDialog(BuildContext context, {LogoutUseCase? logoutUseCase}) async {
+  final useCase = logoutUseCase ?? LogoutUseCase(AuthRepositoryImpl());
+
   return showDialog<void>(
     context: context,
     builder: (BuildContext dialogContext) {
@@ -63,29 +67,43 @@ Future<void> showLogoutDialog(BuildContext context) async {
             ),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.of(dialogContext).pop();
+              final currentToken = UserSession().token;
+
+              // Clear local session and navigate to login screen
               UserSession().clear();
-              // Navigate back to AuthScreen and clear back stack
               Navigator.of(context).pushAndRemoveUntil(
                 MaterialPageRoute(builder: (_) => const AuthScreen()),
                 (route) => false,
               );
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: const Row(
-                    children: [
-                      Icon(Icons.check_circle_outline, color: Colors.white, size: 20),
-                      SizedBox(width: 10),
-                      Text('Logged out successfully'),
-                    ],
+
+              // Asynchronously call backend logout API to invalidate session token
+              if (currentToken.isNotEmpty) {
+                try {
+                  await useCase.call(LogoutParams(token: currentToken));
+                } catch (_) {
+                  // Fallback: local session is safely cleared
+                }
+              }
+
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: const Row(
+                      children: [
+                        Icon(Icons.check_circle_outline, color: Colors.white, size: 20),
+                        SizedBox(width: 10),
+                        Text('Logged out successfully'),
+                      ],
+                    ),
+                    backgroundColor: AppTheme.textDark,
+                    behavior: SnackBarBehavior.floating,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    duration: const Duration(seconds: 2),
                   ),
-                  backgroundColor: AppTheme.textDark,
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
+                );
+              }
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: const Color(0xFFEF4444),
