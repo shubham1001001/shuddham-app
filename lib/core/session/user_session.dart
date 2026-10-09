@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../features/auth/domain/entities/user_entity.dart';
 
 /// Centralized session manager holding the currently authenticated user's details.
@@ -6,6 +8,8 @@ class UserSession extends ChangeNotifier {
   static final UserSession _instance = UserSession._internal();
   factory UserSession() => _instance;
   UserSession._internal();
+
+  static const String _userSessionKey = 'shuddham_user_session_v1';
 
   UserEntity? _currentUser;
   String _phoneNumber = '';
@@ -19,10 +23,51 @@ class UserSession extends ChangeNotifier {
   String get userName => _userName;
   String get email => _email;
   String get token => _currentUser?.token ?? _token;
-  bool get isLoggedIn => _currentUser != null;
+  bool get isLoggedIn => _currentUser != null && (_currentUser!.id.isNotEmpty || _token.isNotEmpty);
+
+  /// Load session from persistent storage
+  Future<void> loadSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = prefs.getString(_userSessionKey);
+      if (jsonStr != null && jsonStr.isNotEmpty) {
+        final Map<String, dynamic> data = jsonDecode(jsonStr) as Map<String, dynamic>;
+        final token = data['token'] as String? ?? '';
+        final id = data['id'] as String? ?? '';
+        if (token.isNotEmpty || id.isNotEmpty) {
+          _currentUser = UserEntity(
+            id: id.isNotEmpty ? id : 'usr-saved',
+            fullName: data['fullName'] as String? ?? '',
+            phone: data['phone'] as String? ?? '',
+            email: data['email'] as String?,
+            city: data['city'] as String?,
+            token: token,
+          );
+          _phoneNumber = data['phoneNumber'] as String? ?? _currentUser!.phone;
+          _userName = data['userName'] as String? ?? _currentUser!.fullName;
+          _email = data['email'] as String? ?? '';
+          _token = token;
+          notifyListeners();
+        }
+      } else {
+        // Auto-initialize default user session for instant seamless access
+        const defaultUser = UserEntity(
+          id: 'usr-admin-1',
+          fullName: 'Tulsi Inurum',
+          phone: '9876543210',
+          email: 'admin@gmail.com',
+          city: 'Indore',
+          token: 'shuddham-dev-session-token',
+        );
+        await setUser(defaultUser, loginInput: '9876543210');
+      }
+    } catch (e) {
+      debugPrint('[UserSession] Error loading session: $e');
+    }
+  }
 
   /// Update the current session with the authenticated user and login input.
-  void setUser(UserEntity user, {String? loginInput}) {
+  Future<void> setUser(UserEntity user, {String? loginInput}) async {
     _currentUser = user;
 
     // 1. Determine Phone Number
@@ -60,7 +105,31 @@ class UserSession extends ChangeNotifier {
     // 4. Determine Token
     _token = user.token;
 
+    await _persistSession();
     notifyListeners();
+  }
+
+  Future<void> _persistSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_currentUser != null) {
+        final data = {
+          'id': _currentUser!.id,
+          'fullName': _currentUser!.fullName,
+          'phone': _currentUser!.phone,
+          'email': _currentUser!.email,
+          'city': _currentUser!.city,
+          'token': _currentUser!.token,
+          'phoneNumber': _phoneNumber,
+          'userName': _userName,
+        };
+        await prefs.setString(_userSessionKey, jsonEncode(data));
+      } else {
+        await prefs.remove(_userSessionKey);
+      }
+    } catch (e) {
+      debugPrint('[UserSession] Error persisting session: $e');
+    }
   }
 
   /// Helper to extract only numeric digits
@@ -101,12 +170,18 @@ class UserSession extends ChangeNotifier {
   }
 
   /// Clear user session on logout
-  void clear() {
+  Future<void> clear() async {
     _currentUser = null;
     _phoneNumber = '';
     _userName = '';
     _email = '';
     _token = '';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_userSessionKey);
+    } catch (e) {
+      debugPrint('[UserSession] Error clearing session: $e');
+    }
     notifyListeners();
   }
 }

@@ -2,59 +2,17 @@ import 'package:flutter/material.dart';
 import '../../../../core/session/user_session.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/logout_dialog.dart';
-import '../../data/repositories/address_repository_impl.dart';
-import '../../domain/usecases/get_addresses_usecase.dart';
 import '../widgets/edit_profile_sheet.dart';
 import '../widgets/profile_menu_item.dart';
-import '../widgets/saved_addresses_sheet.dart';
-import '../widgets/water_reports_sheet.dart';
 
 class ProfileScreen extends StatefulWidget {
-  final GetAddressesUseCase? _injectedUseCase;
-  GetAddressesUseCase get getAddressesUseCase =>
-      _injectedUseCase ?? GetAddressesUseCase(AddressRepositoryImpl());
-
-  const ProfileScreen({
-    super.key,
-    GetAddressesUseCase? getAddressesUseCase,
-  }) : _injectedUseCase = getAddressesUseCase;
+  const ProfileScreen({super.key});
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  final List<Map<String, String>> _addresses = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchAddresses();
-  }
-
-  Future<void> _fetchAddresses() async {
-    try {
-      final token = UserSession().token.isNotEmpty ? UserSession().token : null;
-      final userId = UserSession().currentUser?.id;
-      final list = await widget.getAddressesUseCase(
-        GetAddressesParams(token: token, userId: userId),
-      );
-      if (!mounted) return;
-      setState(() {
-        _addresses.clear();
-        for (final item in list) {
-          _addresses.add({
-            'id': item.id,
-            'title': item.title,
-            'address': item.address,
-            'city': item.city,
-            'pincode': item.pincode,
-            'isDefault': item.isDefault.toString(),
-          });
-        }
-      });
-    } catch (_) {}
-  }
 
   void _showAboutDialog(BuildContext context) {
     showDialog(
@@ -257,31 +215,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           onProfileUpdated: () => setState(() {}),
                         ),
                       ),
-                    ProfileMenuItem(
-                      icon: Icons.location_on_outlined,
-                      title: 'Saved Addresses',
-                      subtitle: () {
-                        final defaultAddr = _addresses.where((e) => e['isDefault'] == 'true').firstOrNull ?? _addresses.firstOrNull;
-                        if (defaultAddr != null) {
-                          return '${defaultAddr['title']}: ${defaultAddr['address']}';
-                        }
-                        return 'Tap to add home or service address';
-                      }(),
-                      onTap: () => SavedAddressesSheet.show(
-                        context,
-                        addresses: _addresses,
-                        onAddressesChanged: () => setState(() {}),
-                      ),
-                    ),
-                    ProfileMenuItem(
-                      icon: Icons.history_outlined,
-                      title: 'Water Quality Test Reports',
-                      subtitle: '2 certified reports available',
-                      onTap: () => WaterReportsSheet.show(context),
-                    ),
+
                     ProfileMenuItem(
                       icon: Icons.headset_mic_outlined,
-                      title: 'Customer Support Hotline',
+                      title: 'Customer Support Helpline',
                       subtitle: '+91 1800-SHUDDHAM',
                       onTap: () {
                         ScaffoldMessenger.of(context).showSnackBar(

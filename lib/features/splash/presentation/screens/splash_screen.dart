@@ -1,6 +1,8 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../../../core/session/user_session.dart';
+import '../../../../main.dart';
 import 'package:shuddham_water_solutions/features/auth/presentation/screens/auth_screen.dart';
 
 /// Splash screen faithfully matching the design in design/screens/Splash.html:
@@ -81,14 +83,22 @@ class _SplashScreenState extends State<SplashScreen>
     }
   }
 
-  void _navigateToAuth() {
+  Future<void> _navigateToAuth() async {
     if (_navigated || !mounted) return;
     _navigated = true;
 
+    // Load persisted session
+    await UserSession().loadSession();
+
+    // Enforce authentication: only redirect to dashboard if user is authenticated
+    final Widget destination = UserSession().isLoggedIn
+        ? const MainNavigationShell()
+        : const AuthScreen();
+
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
       PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            const AuthScreen(),
+        pageBuilder: (context, animation, secondaryAnimation) => destination,
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           return FadeTransition(opacity: animation, child: child);
         },

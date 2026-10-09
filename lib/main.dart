@@ -5,8 +5,11 @@ import 'features/home/presentation/screens/home_screen.dart';
 import 'features/services/presentation/screens/services_screen.dart';
 import 'features/bookings/presentation/screens/bookings_screen.dart';
 import 'features/profile/presentation/screens/profile_screen.dart';
+import 'core/session/user_session.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await UserSession().loadSession();
   runApp(const ShuddhamApp());
 }
 

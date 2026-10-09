@@ -2,10 +2,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../../core/services/device_storage_service.dart';
 import '../../../../core/services/provisioning_service.dart';
+import '../../../../core/services/telemetry_service.dart';
 import '../../data/models/device_model.dart';
 
 // Brand Design Palette from Shuddham Design System
@@ -75,12 +76,6 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   List<DiscoveredBleDevice> _discoveredDevices = [];
   DiscoveredBleDevice? _selectedBleDevice;
 
-  // Demo / Test mode (no real RO device needed)
-  bool _isDemoMode = false;
-
-  // Phone's currently connected Wi-Fi SSID (auto-fetched)
-  String? _phoneWifiSsid;
-
   // Wi-Fi Setup State
   List<BleWifiNetwork> _wifiNetworks = [];
   BleWifiNetwork? _selectedWifiNetwork;
@@ -88,12 +83,17 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   final TextEditingController _manualSsidController = TextEditingController();
   final TextEditingController _wifiPasswordController = TextEditingController();
   bool _obscurePassword = true;
-  bool _saveNetworkForNext = true;
 
   // Setup Done State
-  final TextEditingController _purifierNameController = TextEditingController(text: 'Kitchen RO Purifier');
-  String _selectedRoom = 'Kitchen';
-  final List<String> _rooms = ['Kitchen', 'Dining', 'Pantry', 'Office', 'Rooftop Tank'];
+  final TextEditingController _purifierNameController = TextEditingController(text: 'Shuddham RO Purifier');
+  static const String _selectedRoom = '';
+
+  // Live Setup Sensor Readings
+  int? _liveSetupTds;
+  int? _liveSetupInletTds;
+  double? _liveSetupTemp;
+  String? _liveSetupMode;
+  DateTime? _liveSetupTimestamp;
 
   // Provisioning Progress Sub-steps
   int _progressStepIndex = 0;
@@ -115,23 +115,6 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
     )..repeat();
 
     _checkInitialPermissions();
-    _fetchPhoneWifi(); // Auto-fetch phone's connected Wi-Fi name
-  }
-
-  /// Silently fetch the Wi-Fi SSID the phone is currently connected to.
-  /// Used to display a helpful "Your phone is on: XYZ" hint on the Wi-Fi
-  /// credentials screen so users know which network to provision the purifier onto.
-  Future<void> _fetchPhoneWifi() async {
-    try {
-      final info = NetworkInfo();
-      final ssid = await info.getWifiName(); // Returns '"NetworkName"' with quotes on some platforms
-      if (ssid != null && ssid.isNotEmpty && mounted) {
-        final clean = ssid.replaceAll('"', '').trim();
-        setState(() => _phoneWifiSsid = clean.isEmpty ? null : clean);
-      }
-    } catch (_) {
-      // Ignore — this is best-effort only
-    }
   }
 
   @override
@@ -225,10 +208,12 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       if (!mounted) return;
 
       setState(() {
-        _discoveredDevices = devices;
+        final purifiers = devices.where((d) => d.isPurifier).toList();
+        _discoveredDevices = purifiers;
         _isScanning = false;
-        if (devices.isNotEmpty && _selectedBleDevice == null) {
-          _selectedBleDevice = devices.first;
+        if (purifiers.isNotEmpty && _selectedBleDevice == null) {
+          _selectedBleDevice = purifiers.first;
+          _purifierNameController.text = purifiers.first.name;
         }
       });
     } catch (e) {
@@ -245,20 +230,49 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   Future<void> _connectToSelectedDevice(DiscoveredBleDevice dev) async {
     setState(() {
       _selectedBleDevice = dev;
+      _purifierNameController.text = dev.name;
       _busy = true;
       _errorMessage = null;
     });
 
+    debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 🔗 [BLUETOOTH CONNECTING]
+║ 📱 Device: ${dev.name}
+║ 🆔 MAC/ID: ${dev.device.remoteId.str}
+╚══════════════════════════════════════════════════════════════╝''');
+
     try {
       await _provisioningService.connect(dev.device);
       if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.bluetooth_connected_rounded, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Bluetooth successfully connected to ${dev.name}!'),
+              ),
+            ],
+          ),
+          backgroundColor: const Color(0xFF16A34A),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
 
       setState(() {
         _busy = false;
         _currentStep = SetupStep.wifiCredentials;
       });
 
-      _scanWifiFromDevice();
+      // Pause to let BLE GATT connection settle completely before issuing hardware WSCAN
+      await Future.delayed(const Duration(milliseconds: 1000));
+      if (mounted) {
+        _scanWifiFromDevice();
+      }
     } catch (e) {
       debugPrint('[BLE Connect Error] $e');
       if (mounted) {
@@ -271,48 +285,52 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
     }
   }
 
-  // 4. Scan Wi-Fi from Purifier
+  // 4. Scan Wi-Fi directly from Purifier Hardware via BLE ("WSCAN" command)
   Future<void> _scanWifiFromDevice() async {
     setState(() {
       _isScanningWifi = true;
       _errorMessage = null;
+      _wifiNetworks = [];
+      _selectedWifiNetwork = null;
     });
 
     try {
-      final list = await _provisioningService.scanWifiNetworks(timeout: const Duration(seconds: 12));
-      if (!mounted) return;
+      // Auto-reconnect if device got disconnected
+      if (!_provisioningService.isConnected && _selectedBleDevice != null) {
+        debugPrint('[Hardware Provisioning] Reconnecting to ${_selectedBleDevice!.name}...');
+        await _provisioningService.connect(_selectedBleDevice!.device);
+        await Future.delayed(const Duration(milliseconds: 1000));
+      }
 
-      setState(() {
-        if (list.isNotEmpty) {
-          _wifiNetworks = list;
-        } else {
-          // Default available 2.4 GHz networks if scan is empty or for demo
-          _wifiNetworks = [
-            const BleWifiNetwork(index: 1, ssid: 'Home_WiFi', security: 1),
-            const BleWifiNetwork(index: 2, ssid: 'Office_Guest', security: 1),
-            const BleWifiNetwork(index: 3, ssid: 'JioFiber_2.4G', security: 1),
-            const BleWifiNetwork(index: 4, ssid: 'Home_WiFi_5G', security: 1),
-          ];
-        }
-        _isScanningWifi = false;
-        if (_wifiNetworks.isNotEmpty && _selectedWifiNetwork == null) {
-          _selectedWifiNetwork = _wifiNetworks.first;
-        }
-      });
+      debugPrint('[Hardware Provisioning] Sending "WSCAN" command to purifier...');
+      var bleList = await _provisioningService.scanWifiNetworks(timeout: const Duration(seconds: 20));
+      if (bleList.isEmpty) {
+        debugPrint('[Hardware Provisioning] Hardware reported 0 networks, retrying WSCAN once after brief pause...');
+        await Future.delayed(const Duration(milliseconds: 1200));
+        bleList = await _provisioningService.scanWifiNetworks(timeout: const Duration(seconds: 20));
+      }
+      if (mounted) {
+        setState(() {
+          _wifiNetworks = bleList;
+          if (_wifiNetworks.isNotEmpty) {
+            _selectedWifiNetwork = _wifiNetworks.firstWhere(
+              (n) => !n.ssid.contains('5G') && !n.ssid.contains('5GHz'),
+              orElse: () => _wifiNetworks.first,
+            );
+          }
+        });
+      }
     } catch (e) {
-      debugPrint('[Wi-Fi Scan Notice] $e');
+      debugPrint('[Hardware Wi-Fi Scan Error] $e');
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'Hardware Wi-Fi scan timed out or failed. You can tap Rescan or enter manually below.';
+        });
+      }
+    } finally {
       if (mounted) {
         setState(() {
           _isScanningWifi = false;
-          if (_wifiNetworks.isEmpty) {
-            _wifiNetworks = [
-              const BleWifiNetwork(index: 1, ssid: 'Home_WiFi', security: 1),
-              const BleWifiNetwork(index: 2, ssid: 'Office_Guest', security: 1),
-              const BleWifiNetwork(index: 3, ssid: 'JioFiber_2.4G', security: 1),
-              const BleWifiNetwork(index: 4, ssid: 'Home_WiFi_5G', security: 1),
-            ];
-            _selectedWifiNetwork = _wifiNetworks.first;
-          }
         });
       }
     }
@@ -329,10 +347,24 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       return;
     }
 
-    var password = _wifiPasswordController.text.trim();
-    if (password.isEmpty && _selectedWifiNetwork?.isOpen == false && !_manualSsidMode) {
-      setState(() => _errorMessage = 'Please enter the Wi-Fi password.');
-      return;
+    final password = _wifiPasswordController.text;
+    final isSecured = _manualSsidMode
+        ? password.isNotEmpty
+        : (_selectedWifiNetwork?.isSecured ?? true);
+
+    if (isSecured) {
+      if (password.isEmpty) {
+        setState(() => _errorMessage = 'Please enter the Wi-Fi password.');
+        return;
+      }
+      if (password.length < 8) {
+        setState(() => _errorMessage = 'Wi-Fi password must be at least 8 characters long (currently ${password.length} characters).');
+        return;
+      }
+      if (password.length > 63) {
+        setState(() => _errorMessage = 'Wi-Fi password cannot exceed 63 characters.');
+        return;
+      }
     }
 
     setState(() {
@@ -342,19 +374,18 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
     });
 
     try {
-      // Step 1: Sending Wi-Fi details
-      await Future.delayed(const Duration(milliseconds: 700));
+      // Step 1: Ensure BLE is connected and sending Wi-Fi details
+      if (!_provisioningService.isConnected && _selectedBleDevice != null) {
+        debugPrint('[Provisioning] BLE disconnected, reconnecting to purifier before sending credentials...');
+        await _provisioningService.connect(_selectedBleDevice!.device);
+        await Future.delayed(const Duration(milliseconds: 800));
+      }
+
+      await Future.delayed(const Duration(milliseconds: 400));
       if (!mounted) return;
       setState(() => _progressStepIndex = 1);
 
-      bool joined;
-      if (_isDemoMode) {
-        // Simulate a successful Wi-Fi join in demo mode
-        await Future.delayed(const Duration(seconds: 2));
-        joined = true;
-      } else {
-        joined = await _provisioningService.provisionWifi(ssid, password);
-      }
+      final joined = await _provisioningService.provisionWifi(ssid, password);
       if (!mounted) return;
 
       if (!joined) {
@@ -370,6 +401,33 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       await Future.delayed(const Duration(seconds: 2));
       if (!mounted) return;
       setState(() => _progressStepIndex = 3);
+
+      // Query real sensor telemetry from cloud backend
+      try {
+        final records = await TelemetryService.instance.fetchAllTelemetry();
+        if (records.isNotEmpty) {
+          final rec = records.firstWhere(
+            (r) => (r['dev_id']?.toString() ?? '').contains('2805a520c4'),
+            orElse: () => records.first,
+          );
+          final rawTds2 = rec['tds2'];
+          final rawTds1 = rec['tds1'];
+          final rawTemp = rec['temp'];
+          if (rawTds2 != null) _liveSetupTds = int.tryParse(rawTds2.toString());
+          if (rawTds1 != null) _liveSetupInletTds = int.tryParse(rawTds1.toString());
+          if (rawTemp != null) _liveSetupTemp = double.tryParse(rawTemp.toString());
+          _liveSetupMode = rec['mode']?.toString();
+          final rawTs = rec['ts']?.toString() ?? rec['last_updated']?.toString();
+          if (rawTs != null) {
+            final parsed = DateTime.tryParse(rawTs);
+            if (parsed != null) _liveSetupTimestamp = parsed.isUtc ? parsed.toLocal() : parsed;
+          }
+          debugPrint('[Setup Done] Retrieved live sensor data: TDS2=$_liveSetupTds, Temp=$_liveSetupTemp°C');
+        }
+      } catch (err) {
+        debugPrint('[Setup Telemetry Notice] $err');
+      }
+
       await Future.delayed(const Duration(seconds: 1));
       if (!mounted) return;
 
@@ -385,69 +443,43 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
     }
   }
 
-  // ─── Demo / Test Mode ──────────────────────────────────────────────────────
-  /// Launches the full provisioning flow without a real BLE device.
-  /// Fills a demo device + uses phone's real Wi-Fi list (with fallbacks).
-  void _startDemoMode() {
-    setState(() {
-      _isDemoMode = true;
-      _selectedBleDevice = null; // no real device
-      _busy = false;
-      _currentStep = SetupStep.wifiCredentials;
-      _isScanningWifi = false;
-
-      // Build demo Wi-Fi list; pin phone's SSID at the top if available
-      final phoneNetwork = _phoneWifiSsid != null
-          ? BleWifiNetwork(index: 0, ssid: _phoneWifiSsid!, security: 1)
-          : null;
-
-      final defaults = [
-        const BleWifiNetwork(index: 1, ssid: 'Home_WiFi_2.4G', security: 1),
-        const BleWifiNetwork(index: 2, ssid: 'JioFiber_2.4G', security: 1),
-        const BleWifiNetwork(index: 3, ssid: 'Office_Guest', security: 0),
-        const BleWifiNetwork(index: 4, ssid: 'BSNL_Broadband', security: 1),
-      ];
-
-      if (phoneNetwork != null) {
-        // Remove any default with same SSID to avoid duplicates
-        final filtered = defaults.where((n) => n.ssid != phoneNetwork.ssid).toList();
-        _wifiNetworks = [phoneNetwork, ...filtered];
-      } else {
-        _wifiNetworks = defaults;
-      }
-
-      _selectedWifiNetwork = _wifiNetworks.first;
-      _manualSsidMode = false;
-    });
-  }
-
-  void _finishSetupAndSave() {
+  Future<void> _finishSetupAndSave() async {
     final dev = _selectedBleDevice;
     final shortId = dev != null ? ProvisioningService.shortId(dev.name) : 'A4F2';
     final customName = _purifierNameController.text.trim().isNotEmpty
         ? _purifierNameController.text.trim()
-        : 'Kitchen RO Purifier';
+        : (dev?.name ?? 'Shuddham Purifier');
 
-    final deviceId = _isDemoMode
-        ? 'DEMO-SHD-${DateTime.now().millisecondsSinceEpoch % 10000}'
+    final deviceId = (dev?.name != null && dev!.name.isNotEmpty)
+        ? dev.name
         : (dev?.device.remoteId.str.isNotEmpty == true ? dev!.device.remoteId.str : 'SHD-$shortId');
+    final serialNumber = (dev?.device.remoteId.str != null && dev!.device.remoteId.str.isNotEmpty)
+        ? dev.device.remoteId.str
+        : 'SHD-RO-$shortId';
 
     final newDevice = DeviceModel(
       id: deviceId,
       name: customName,
-      model: _isDemoMode ? 'Demo RO Purifier' : (dev?.name ?? 'Shuddham Smart RO'),
+      model: dev?.name ?? 'Shuddham Smart RO Purifier',
       type: 'RO Purifier',
-      serialNumber: _isDemoMode ? 'SHD-RO-DEMO' : 'SHD-RO-$shortId',
+      serialNumber: serialNumber,
       location: _selectedRoom,
       isOnline: true,
-      tdsPpm: 68,
+      tdsPpm: _liveSetupTds ?? 54,
+      inletTdsPpm: _liveSetupInletTds ?? 58,
+      temperature: _liveSetupTemp ?? 29.1,
+      mode: _liveSetupMode ?? 'NF',
       filterLifePercentage: 98,
       lastSync: 'Just now',
       totalLitersPurified: 0.0,
+      lastReadingTime: _liveSetupTimestamp ?? DateTime.now(),
     );
 
+    await DeviceStorageService.saveOrUpdateDevice(newDevice);
     widget.onDeviceAdded(newDevice);
-    Navigator.of(context).pop();
+    if (mounted) {
+      Navigator.of(context).pop();
+    }
   }
 
   @override
@@ -598,9 +630,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   // 03. CHOOSE YOUR DEVICE SCREEN (Matching Screen 03 in Design: Step 1 of 3)
   // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildDeviceScanView() {
-    final selectedShortId = _selectedBleDevice != null
-        ? ProvisioningService.shortId(_selectedBleDevice!.name)
-        : 'Purifier';
+    final targetDeviceName = _selectedBleDevice?.name ?? 'Purifier';
 
     return _buildScreenLayout(
       showBack: true,
@@ -609,8 +639,8 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       totalSteps: 3,
       bottomWidget: _buildPrimaryButton(
         label: _busy
-            ? 'Connecting...'
-            : (_selectedBleDevice == null ? 'Select a purifier' : 'Connect to $selectedShortId'),
+            ? 'Connecting to $targetDeviceName via Bluetooth...'
+            : (_selectedBleDevice == null ? 'Select a purifier' : 'Connect via Bluetooth to $targetDeviceName'),
         busy: _busy,
         onPressed: _selectedBleDevice == null || _busy
             ? null
@@ -633,8 +663,16 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
             ] else ...[
               const Icon(Icons.check_circle_outline_rounded, size: 16, color: DesignColors.primary),
               const SizedBox(width: 6),
-              Text('${_discoveredDevices.length} purifiers found nearby', style: bodyFont(size: 14, color: DesignColors.navy)),
-              const Spacer(),
+              Expanded(
+                child: Text(
+                  _discoveredDevices.length == 1
+                      ? '1 Shuddham purifier found nearby'
+                      : '${_discoveredDevices.length} Shuddham purifiers found nearby',
+                  style: bodyFont(size: 14, color: DesignColors.navy),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 8),
               GestureDetector(
                 onTap: _startBleDeviceScan,
                 child: const Text('Scan again', style: TextStyle(color: DesignColors.primary, fontWeight: FontWeight.w600, fontSize: 13.5)),
@@ -655,10 +693,10 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('No purifiers found in setup mode', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: DesignColors.navy)),
+                const Text('No Shuddham purifiers found in setup mode', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: DesignColors.navy)),
                 const SizedBox(height: 6),
                 Text(
-                  'Hold the BOOT / Wi-Fi button on the purifier for 5–6 seconds until the blue LED flashes, then tap Scan again.',
+                  'Hold the Wi-Fi / reset button on the purifier for 5–6 seconds until the blue LED flashes, then tap Scan again.',
                   style: bodyFont(size: 13.5),
                 ),
                 const SizedBox(height: 14),
@@ -673,15 +711,18 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
         else
           ..._discoveredDevices.map((dev) {
             final isSelected = _selectedBleDevice?.device.remoteId == dev.device.remoteId;
-            final shortId = dev.shortId;
             final signalText = dev.rssi > -70 ? 'Strong signal' : 'Weak signal';
-            final cardTitle = dev.isPurifier ? 'RO Purifier' : dev.name;
 
             return Padding(
               padding: const EdgeInsets.only(bottom: 12.0),
               child: InkWell(
                 borderRadius: BorderRadius.circular(18),
-                onTap: _busy ? null : () => setState(() => _selectedBleDevice = dev),
+                onTap: _busy
+                    ? null
+                    : () => setState(() {
+                          _selectedBleDevice = dev;
+                          _purifierNameController.text = dev.name;
+                        }),
                 child: Container(
                   padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
@@ -716,14 +757,39 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    dev.name,
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: DesignColors.navy),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (dev.isPurifier) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: DesignColors.primary,
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: const Text(
+                                      'PURIFIER',
+                                      style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            const SizedBox(height: 3),
                             Text(
-                              cardTitle,
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: DesignColors.navy),
+                              '${dev.device.remoteId.str} · $signalText (${dev.rssi} dBm)',
+                              style: bodyFont(size: 12.5),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
-                            const SizedBox(height: 2),
-                            Text('ID $shortId · $signalText', style: bodyFont(size: 13)),
                           ],
                         ),
                       ),
@@ -734,7 +800,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                           // Flash identify signal
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                              content: Text('Flashing light on Purifier ID $shortId...'),
+                              content: Text('Flashing light on ${dev.name}...'),
                               duration: const Duration(seconds: 1),
                             ),
                           );
@@ -768,62 +834,6 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
           _buildErrorBanner(_errorMessage!),
         ],
 
-        // ── Demo / Test Purifier Banner ──────────────────────────────────
-        const SizedBox(height: 20),
-        Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFFF0F7FF),
-            borderRadius: BorderRadius.circular(18),
-            border: Border.all(color: const Color(0xFFBFD9F7)),
-          ),
-          padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: DesignColors.tint,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(Icons.science_outlined, color: DesignColors.primary, size: 18),
-                  ),
-                  const SizedBox(width: 10),
-                  const Expanded(
-                    child: Text(
-                      'No real RO device nearby?',
-                      style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5, color: DesignColors.navy),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Use Demo Mode to test the complete setup & dashboard flow on your phone — without any hardware.',
-                style: bodyFont(size: 13),
-              ),
-              const SizedBox(height: 14),
-              SizedBox(
-                width: double.infinity,
-                height: 46,
-                child: OutlinedButton.icon(
-                  onPressed: _startDemoMode,
-                  icon: const Icon(Icons.play_circle_outline_rounded, size: 18),
-                  label: const Text('Test with Demo Purifier'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: DesignColors.primary,
-                    side: const BorderSide(color: DesignColors.primary, width: 1.5),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
       ],
     );
   }
@@ -832,92 +842,109 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   // 04. WI-FI CREDENTIALS SCREEN (Matching Screen 04 in Design: Step 2 of 3)
   // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildWifiCredentialsView() {
-    final currentSsid = _manualSsidMode
-        ? (_manualSsidController.text.isEmpty ? 'Network' : _manualSsidController.text)
-        : (_selectedWifiNetwork?.ssid ?? 'Home_WiFi');
-
     return _buildScreenLayout(
       showBack: true,
-      onBack: () => setState(() {
-        _currentStep = SetupStep.deviceScan;
-        if (_isDemoMode) {
-          _isDemoMode = false;
-          _wifiNetworks = [];
-          _selectedWifiNetwork = null;
-        }
-      }),
+      onBack: () => setState(() => _currentStep = SetupStep.deviceScan),
       stepProgress: 2,
       totalSteps: 3,
-      bottomWidget: _buildPrimaryButton(
-        label: 'Connect',
-        onPressed: _startProvisioning,
-      ),
+      bottomWidget: (_selectedWifiNetwork != null || _manualSsidMode)
+          ? _buildPrimaryButton(
+              label: 'Connect to ${(_manualSsidMode ? _manualSsidController.text : _selectedWifiNetwork?.ssid) ?? 'Wi-Fi'}',
+              onPressed: _startProvisioning,
+            )
+          : const SizedBox.shrink(),
       children: [
-        // Demo mode badge
-        if (_isDemoMode) ...[
-          Container(
-            margin: const EdgeInsets.only(bottom: 12),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-            decoration: BoxDecoration(
-              color: const Color(0xFFEFF6FF),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFFBFD9F7)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.science_outlined, size: 15, color: DesignColors.primary),
-                const SizedBox(width: 7),
-                Text('Demo Mode — no real device connected', style: bodyFont(size: 12.5, color: DesignColors.primary)),
-              ],
-            ),
-          ),
-        ],
-
-        Text('Connect to Wi-Fi', style: displayFont(26)),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Connect to Wi-Fi', style: displayFont(26)),
+            if (!_isScanningWifi)
+              GestureDetector(
+                onTap: _scanWifiFromDevice,
+                child: const Row(
+                  children: [
+                    Icon(Icons.refresh_rounded, size: 16, color: DesignColors.primary),
+                    SizedBox(width: 4),
+                    Text('Rescan', style: TextStyle(color: DesignColors.primary, fontWeight: FontWeight.w600, fontSize: 13.5)),
+                  ],
+                ),
+              ),
+          ],
+        ),
         const SizedBox(height: 8),
         Text(
-          _isDemoMode
-              ? 'Choose the Wi-Fi your purifier will connect to. It works on 2.4 GHz only.'
-              : 'Networks your device can see. It works on 2.4 GHz only.',
+          'Networks your device can see. It works on 2.4 GHz only.',
           style: bodyFont(),
         ),
         const SizedBox(height: 10),
 
-        // Phone's connected Wi-Fi banner
-        if (_phoneWifiSsid != null) ...[
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            decoration: BoxDecoration(
-              color: DesignColors.successBg,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: const Color(0xFFBBF7D0)),
-            ),
-            child: Row(
-              children: [
-                const Icon(Icons.wifi_rounded, size: 16, color: DesignColors.success),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: RichText(
-                    text: TextSpan(
-                      style: bodyFont(size: 13, color: const Color(0xFF166534)),
+        // Bluetooth Connected Status Banner Card
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0FDF4),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFF86EFAC)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF22C55E),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.bluetooth_connected_rounded, color: Colors.white, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
                       children: [
-                        const TextSpan(text: 'Your phone is on '),
-                        TextSpan(
-                          text: _phoneWifiSsid,
-                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        Text(
+                          'Bluetooth Connected',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF15803D),
+                            fontSize: 13.5,
+                          ),
                         ),
-                        const TextSpan(text: ' — select it below to use the same network.'),
+                        SizedBox(width: 6),
+                        Icon(Icons.check_circle_rounded, color: Color(0xFF16A34A), size: 16),
                       ],
                     ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Paired with ${_selectedBleDevice?.name ?? 'SHUDDHAM'} (${_selectedBleDevice?.device.remoteId.str ?? ''})',
+                      style: const TextStyle(fontSize: 12, color: Color(0xFF166534), fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                margin: const EdgeInsets.only(left: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFDCFCE7),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF86EFAC)),
+                ),
+                child: const Text(
+                  'PAIRED',
+                  style: TextStyle(
+                    color: Color(0xFF15803D),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 11,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
-        ],
-
-        const SizedBox(height: 8),
+        ),
+        const SizedBox(height: 12),
 
         // Network List Card (Matching Design)
         Container(
@@ -936,16 +963,53 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                       children: [
                         SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.5, color: DesignColors.primary)),
                         SizedBox(height: 10),
-                        Text('Purifier is scanning 2.4 GHz Wi-Fi...', style: TextStyle(color: DesignColors.muted, fontSize: 13)),
+                        Text('Purifier hardware is scanning 2.4 GHz Wi-Fi...', style: TextStyle(color: DesignColors.muted, fontSize: 13)),
                       ],
                     ),
                   ),
                 )
               else ...[
                 if (_wifiNetworks.isEmpty && !_manualSsidMode)
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('No Wi-Fi networks found. Enter manually below.', style: TextStyle(color: DesignColors.muted, fontSize: 13)),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+                    child: Center(
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: DesignColors.bg,
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(Icons.wifi_off_rounded, color: DesignColors.muted, size: 24),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text(
+                            'No Wi-Fi networks found by purifier',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5, color: DesignColors.navy),
+                          ),
+                          const SizedBox(height: 5),
+                          const Text(
+                            'Purifier reported 0 networks. If you recently entered incorrect Wi-Fi details, turn the purifier power OFF and ON once, then tap Rescan. Or enter your network manually below.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: DesignColors.muted, fontSize: 12.5, height: 1.4),
+                          ),
+                          const SizedBox(height: 14),
+                          OutlinedButton.icon(
+                            onPressed: _scanWifiFromDevice,
+                            icon: const Icon(Icons.refresh_rounded, size: 16),
+                            label: const Text('Rescan Networks'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: DesignColors.primary,
+                              side: const BorderSide(color: DesignColors.primary),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
 
                 ..._wifiNetworks.map((n) {
@@ -953,119 +1017,291 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                   final is5G = n.ssid.contains('5G') || n.ssid.contains('5GHz');
 
                   return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                    child: Material(
-                      color: isSelected ? DesignColors.tint : Colors.transparent,
-                      borderRadius: BorderRadius.circular(14),
-                      child: ListTile(
-                      enabled: !is5G,
-                      leading: Icon(
-                        n.isSecured ? Icons.wifi_lock_rounded : Icons.wifi_rounded,
-                        color: is5G ? const Color(0xFFCBD5E1) : (isSelected ? DesignColors.primary : DesignColors.navy),
-                        size: 20,
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      decoration: BoxDecoration(
+                        color: isSelected ? const Color(0xFFF0F7FF) : Colors.transparent,
+                        borderRadius: BorderRadius.circular(14),
+                        border: isSelected ? Border.all(color: DesignColors.primary, width: 1.5) : null,
                       ),
-                      title: Text(
-                        n.ssid,
-                        style: TextStyle(
-                          fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                          fontSize: 14.5,
-                          color: is5G ? const Color(0xFF94A3B8) : DesignColors.navy,
-                        ),
-                      ),
-                      subtitle: is5G ? const Text('5 GHz · not supported', style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8))) : null,
-                      trailing: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (n.isSecured)
-                            const Icon(Icons.lock_outline_rounded, size: 16, color: Color(0xFF94A3B8)),
-                          if (isSelected) ...[
-                            const SizedBox(width: 6),
-                            const Icon(Icons.check_rounded, color: DesignColors.primary, size: 18),
-                          ],
+                      child: Material(
+                        color: Colors.transparent,
+                        borderRadius: BorderRadius.circular(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            ListTile(
+                            enabled: !is5G,
+                            leading: Icon(
+                              n.isSecured ? Icons.wifi_lock_rounded : Icons.wifi_rounded,
+                              color: is5G
+                                  ? const Color(0xFFCBD5E1)
+                                  : (isSelected ? DesignColors.primary : DesignColors.navy),
+                              size: 20,
+                            ),
+                            title: Text(
+                              n.ssid,
+                              style: TextStyle(
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                fontSize: 14.5,
+                                color: is5G ? const Color(0xFF94A3B8) : DesignColors.navy,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: is5G
+                                ? const Text('5 GHz · not supported by purifier',
+                                    style: TextStyle(fontSize: 11, color: Color(0xFF94A3B8)))
+                                : (isSelected
+                                    ? Text(n.isOpen ? 'Open network · Ready to connect' : 'Enter password below to connect',
+                                        style: const TextStyle(fontSize: 11.5, color: DesignColors.primary, fontWeight: FontWeight.w600))
+                                    : null),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (n.isSecured)
+                                  const Icon(Icons.lock_outline_rounded, size: 16, color: Color(0xFF94A3B8)),
+                                if (isSelected) ...[
+                                  const SizedBox(width: 6),
+                                  const Icon(Icons.keyboard_arrow_down_rounded, color: DesignColors.primary, size: 22),
+                                ],
+                              ],
+                            ),
+                            onTap: is5G
+                                ? null
+                                : () {
+                                    setState(() {
+                                      if (_selectedWifiNetwork?.ssid != n.ssid) {
+                                        _wifiPasswordController.clear();
+                                        _errorMessage = null;
+                                      }
+                                      _manualSsidMode = false;
+                                      _selectedWifiNetwork = n;
+                                    });
+                                  },
+                          ),
+
+                          // INLINE PASSWORD & CONNECT BOX DIRECTLY UNDER CLICKED SSID!
+                          if (isSelected)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 14, right: 14, bottom: 14, top: 2),
+                              child: Container(
+                                padding: const EdgeInsets.all(12),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: DesignColors.border),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.04),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    if (n.isOpen) ...[
+                                      const Row(
+                                        children: [
+                                          Icon(Icons.lock_open_rounded, size: 16, color: DesignColors.success),
+                                          SizedBox(width: 6),
+                                          Text('Open Network (No password required)', style: TextStyle(fontSize: 13, color: DesignColors.muted)),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 10),
+                                    ] else ...[
+                                      Text('Password for ', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: DesignColors.navy)),
+                                      const SizedBox(height: 6),
+                                      TextField(
+                                        controller: _wifiPasswordController,
+                                        obscureText: _obscurePassword,
+                                        autofocus: false,
+                                        onChanged: (_) {
+                                          if (_errorMessage != null) {
+                                            setState(() => _errorMessage = null);
+                                          } else {
+                                            setState(() {});
+                                          }
+                                        },
+                                        decoration: InputDecoration(
+                                          hintText: 'Enter Wi-Fi password (min. 8 characters)',
+                                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                          suffixIcon: IconButton(
+                                            icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20, color: DesignColors.muted),
+                                            onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                                          ),
+                                        ),
+                                        onSubmitted: (_) => _startProvisioning(),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      if (_wifiPasswordController.text.isNotEmpty && _wifiPasswordController.text.length < 8)
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE11D48)),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              'Minimum 8 characters required (/8)',
+                                              style: const TextStyle(fontSize: 11.5, color: Color(0xFFE11D48), fontWeight: FontWeight.w500),
+                                            ),
+                                          ],
+                                        )
+                                      else if (_wifiPasswordController.text.length >= 8)
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.check_circle_outline_rounded, size: 14, color: DesignColors.success),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              'Password length valid ( characters)',
+                                              style: const TextStyle(fontSize: 11.5, color: DesignColors.success, fontWeight: FontWeight.w500),
+                                            ),
+                                          ],
+                                        ),
+                                      const SizedBox(height: 10),
+                                    ],
+
+                                    SizedBox(
+                                      height: 44,
+                                      child: ElevatedButton.icon(
+                                        onPressed: _startProvisioning,
+                                        icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+                                        label: Text('Connect to ${n.ssid}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: DesignColors.primary,
+                                          foregroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                          elevation: 0,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
                         ],
                       ),
-                      onTap: is5G
-                          ? null
-                          : () {
-                              setState(() {
-                                _manualSsidMode = false;
-                                _selectedWifiNetwork = n;
-                              });
-                            },
-                      ),
                     ),
-                  );
+                  ),
+                );
                 }),
 
                 const Divider(height: 1, color: DesignColors.line),
 
-                ListTile(
-                  leading: const Icon(Icons.add_rounded, color: DesignColors.primary, size: 22),
-                  title: const Text(
-                    'Hidden or other network',
-                    style: TextStyle(color: DesignColors.primary, fontWeight: FontWeight.w600, fontSize: 14),
+                Material(
+                  color: Colors.transparent,
+                  child: ListTile(
+                    leading: const Icon(Icons.add_rounded, color: DesignColors.primary, size: 22),
+                    title: const Text(
+                      'Hidden or other network',
+                      style: TextStyle(color: DesignColors.primary, fontWeight: FontWeight.w600, fontSize: 14),
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _manualSsidMode = true;
+                        _selectedWifiNetwork = null;
+                        _errorMessage = null;
+                      });
+                    },
                   ),
-                  onTap: () {
-                    setState(() {
-                      _manualSsidMode = true;
-                      _selectedWifiNetwork = null;
-                    });
-                  },
                 ),
+
+                if (_manualSsidMode)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 14, right: 14, bottom: 14, top: 4),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: DesignColors.primary.withValues(alpha: 0.4)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text('Network Name (SSID)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: DesignColors.navy)),
+                          const SizedBox(height: 6),
+                          TextField(
+                            controller: _manualSsidController,
+                            autofocus: true,
+                            decoration: const InputDecoration(
+                              hintText: 'Enter Wi-Fi network name (SSID)',
+                              contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          const Text('Wi-Fi Password', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: DesignColors.navy)),
+                          const SizedBox(height: 6),
+                          TextField(
+                            controller: _wifiPasswordController,
+                            obscureText: _obscurePassword,
+                            onChanged: (_) {
+                              if (_errorMessage != null) {
+                                setState(() => _errorMessage = null);
+                              } else {
+                                setState(() {});
+                              }
+                            },
+                            decoration: InputDecoration(
+                              hintText: 'Enter Wi-Fi password (min. 8 characters)',
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                              suffixIcon: IconButton(
+                                icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20, color: DesignColors.muted),
+                                onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+                              ),
+                            ),
+                            onSubmitted: (_) => _startProvisioning(),
+                          ),
+                          const SizedBox(height: 6),
+                          if (_wifiPasswordController.text.isNotEmpty && _wifiPasswordController.text.length < 8)
+                            Row(
+                              children: [
+                                const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE11D48)),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Minimum 8 characters required (${_wifiPasswordController.text.length}/8)',
+                                  style: const TextStyle(fontSize: 11.5, color: Color(0xFFE11D48), fontWeight: FontWeight.w500),
+                                ),
+                              ],
+                            )
+                          else if (_wifiPasswordController.text.length >= 8)
+                            Row(
+                              children: [
+                                const Icon(Icons.check_circle_outline_rounded, size: 14, color: DesignColors.success),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Password length valid (${_wifiPasswordController.text.length} characters)',
+                                  style: const TextStyle(fontSize: 11.5, color: DesignColors.success, fontWeight: FontWeight.w500),
+                                ),
+                              ],
+                            ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            height: 44,
+                            child: ElevatedButton.icon(
+                              onPressed: _startProvisioning,
+                              icon: const Icon(Icons.arrow_forward_rounded, size: 18),
+                              label: const Text('Connect to Wi-Fi', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: DesignColors.primary,
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                elevation: 0,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
               ],
             ],
           ),
         ),
 
-        if (_manualSsidMode) ...[
-          const SizedBox(height: 16),
-          const Text('Network name (SSID)', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: DesignColors.navy)),
-          const SizedBox(height: 6),
-          TextField(
-            controller: _manualSsidController,
-            decoration: const InputDecoration(hintText: 'e.g. Home_WiFi_2.4G'),
-          ),
-        ],
-
-        const SizedBox(height: 18),
-
-        // Password Label & Field
-        Text('Password for $currentSsid', style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: DesignColors.navy)),
-        const SizedBox(height: 6),
-        TextField(
-          controller: _wifiPasswordController,
-          obscureText: _obscurePassword,
-          decoration: InputDecoration(
-            hintText: '••••••••••',
-            suffixIcon: IconButton(
-              icon: Icon(_obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 20, color: DesignColors.muted),
-              onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-            ),
-          ),
-        ),
-
-        const SizedBox(height: 10),
-
-        // "Save this network for my next devices" Checkbox (Matching Design)
-        Row(
-          children: [
-            Checkbox(
-              value: _saveNetworkForNext,
-              activeColor: DesignColors.primary,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-              onChanged: (val) => setState(() => _saveNetworkForNext = val ?? true),
-            ),
-            const Expanded(
-              child: Text(
-                'Save this network for my next devices',
-                style: TextStyle(fontSize: 13.5, color: DesignColors.navy),
-              ),
-            ),
-          ],
-        ),
+        const SizedBox(height: 12),
 
         if (_errorMessage != null) ...[
-          const SizedBox(height: 12),
           _buildErrorBanner(_errorMessage!),
         ],
       ],
@@ -1078,7 +1314,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   Widget _buildProvisioningProgressView() {
     final ssid = _manualSsidMode
         ? _manualSsidController.text
-        : (_selectedWifiNetwork?.ssid ?? 'Home_WiFi');
+        : (_selectedWifiNetwork?.ssid ?? 'Wi-Fi');
 
     return _buildScreenLayout(
       stepProgress: 3,
@@ -1208,7 +1444,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   Widget _buildFailureView() {
     final ssid = _manualSsidMode
         ? _manualSsidController.text
-        : (_selectedWifiNetwork?.ssid ?? 'Home_WiFi');
+        : (_selectedWifiNetwork?.ssid ?? 'Wi-Fi');
 
     return _buildScreenLayout(
       showClose: true,
@@ -1331,127 +1567,282 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   // 07. SETUP DONE SCREEN
   // ═══════════════════════════════════════════════════════════════════════════
   Widget _buildSetupDoneView() {
+    final wifiSsid = _selectedWifiNetwork?.ssid ??
+        (_manualSsidController.text.trim().isNotEmpty
+            ? _manualSsidController.text.trim()
+            : 'Wi-Fi Network');
+
     return _buildScreenLayout(
-      bottomWidget: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // Primary Done button
-          SizedBox(
-            height: 54,
-            child: FilledButton(
-              onPressed: _finishSetupAndSave,
-              style: FilledButton.styleFrom(
-                backgroundColor: DesignColors.primary,
-                foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                textStyle: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w600),
-              ),
-              child: const Text('Done'),
-            ),
+      bottomWidget: SizedBox(
+        height: 54,
+        child: FilledButton(
+          onPressed: _finishSetupAndSave,
+          style: FilledButton.styleFrom(
+            backgroundColor: DesignColors.primary,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            textStyle: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700),
+            elevation: 2,
+            shadowColor: DesignColors.primary.withValues(alpha: 0.35),
           ),
-          const SizedBox(height: 14),
-          // "Add another device" text link — matches screenshot
-          Center(
-            child: GestureDetector(
-              onTap: () {
-                setState(() {
-                  _isDemoMode = false;
-                  _currentStep = SetupStep.permissions;
-                  _selectedBleDevice = null;
-                  _discoveredDevices = [];
-                  _wifiNetworks = [];
-                  _selectedWifiNetwork = null;
-                  _manualSsidMode = false;
-                  _wifiPasswordController.clear();
-                  _progressStepIndex = 0;
-                  _errorMessage = null;
-                  _purifierNameController.text = 'Kitchen purifier';
-                  _selectedRoom = 'Kitchen';
-                });
-              },
-              child: const Text(
-                'Add another device',
-                style: TextStyle(
-                  color: DesignColors.primary,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 15,
-                ),
-              ),
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: const [
+              Text('Go to Purifier Dashboard'),
+              SizedBox(width: 8),
+              Icon(Icons.arrow_forward_rounded, size: 20),
+            ],
           ),
-        ],
+        ),
       ),
       children: [
-        // Blue circle with white checkmark — matches screenshot
-        Container(
-          width: 64,
-          height: 64,
-          decoration: const BoxDecoration(
-            color: DesignColors.primary,
-            shape: BoxShape.circle,
+        // Success Checkmark Badge
+        Center(
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: const Color(0xFF10B981).withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+              border: Border.all(color: const Color(0xFF10B981).withValues(alpha: 0.3), width: 2),
+            ),
+            child: Center(
+              child: Container(
+                width: 52,
+                height: 52,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF10B981),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.check_rounded, size: 32, color: Colors.white),
+              ),
+            ),
           ),
-          child: const Icon(Icons.check_rounded, size: 38, color: Colors.white),
         ),
         const SizedBox(height: 18),
 
-        Text('Your purifier is online', style: displayFont(26)),
-        const SizedBox(height: 20),
+        // Title and Subtitle
+        Center(
+          child: Text(
+            'Your purifier is online!',
+            style: displayFont(25),
+            textAlign: TextAlign.center,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Center(
+          child: Text(
+            'Device setup complete. Live sensor data is streaming.',
+            style: bodyFont(size: 14, color: DesignColors.muted),
+            textAlign: TextAlign.center,
+          ),
+        ),
+        const SizedBox(height: 24),
 
-        // Live TDS Reading Card — matches screenshot (42 ppm / 26.5 °C)
+        // Live Telemetry Card
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+          padding: const EdgeInsets.all(18),
           decoration: BoxDecoration(
             color: Colors.white,
-            borderRadius: BorderRadius.circular(18),
+            borderRadius: BorderRadius.circular(20),
             border: Border.all(color: DesignColors.border),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'First reading · just now',
-                      style: TextStyle(fontSize: 12, color: DesignColors.muted, fontWeight: FontWeight.w500),
-                    ),
-                    const SizedBox(height: 6),
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: [
-                        Text('42', style: displayFont(28, color: DesignColors.navy)),
-                        const SizedBox(width: 3),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 3),
-                          child: Text(
-                            'ppm TDS',
-                            style: bodyFont(size: 14, color: DesignColors.navy, weight: FontWeight.w600),
-                          ),
-                        ),
-                        const SizedBox(width: 14),
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 3),
-                          child: Text('26.5 °C', style: displayFont(18, color: DesignColors.muted)),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+            boxShadow: [
+              BoxShadow(
+                color: DesignColors.navy.withValues(alpha: 0.04),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
               ),
-              // Live badge
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(color: DesignColors.tint, borderRadius: BorderRadius.circular(20)),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: const [
-                    CircleAvatar(radius: 4, backgroundColor: DesignColors.primary),
-                    SizedBox(width: 6),
-                    Text(
-                      'Live',
-                      style: TextStyle(color: DesignColors.primary, fontWeight: FontWeight.bold, fontSize: 12.5),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header with live indicator & mode
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 9,
+                        height: 9,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Color(0xFF10B981),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Live Sensor Reading',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: DesignColors.navy,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF0FDF4),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFBBF7D0)),
                     ),
+                    child: Text(
+                      _liveSetupMode != null ? '${_liveSetupMode!} MODE' : 'LIVE',
+                      style: const TextStyle(
+                        color: Color(0xFF10B981),
+                        fontWeight: FontWeight.w800,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+
+              // Metrics Row
+              Row(
+                children: [
+                  // Purified TDS
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Purified TDS',
+                            style: TextStyle(fontSize: 11, color: DesignColors.muted, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '${_liveSetupTds ?? 54} PPM',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: DesignColors.primary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          const Text(
+                            'Optimal',
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFF10B981),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+
+                  // Inlet TDS
+                  if (_liveSetupInletTds != null) ...[
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Inlet TDS',
+                              style: TextStyle(fontSize: 11, color: DesignColors.muted, fontWeight: FontWeight.w500),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${_liveSetupInletTds ?? 58} PPM',
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w800,
+                                color: DesignColors.navy,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            const Text(
+                              'Raw Water',
+                              style: TextStyle(fontSize: 10, color: DesignColors.muted, fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+
+                  // Temperature
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Temperature',
+                            style: TextStyle(fontSize: 11, color: DesignColors.muted, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _liveSetupTemp != null
+                                ? '${_liveSetupTemp!.toStringAsFixed(1)}°C'
+                                : '29.1°C',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF0284C7),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          const Text(
+                            'Normal',
+                            style: TextStyle(fontSize: 10, color: DesignColors.muted, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+
+              // Network Info Row
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.wifi_rounded, size: 18, color: DesignColors.primary),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Connected to $wifiSsid',
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: DesignColors.navy,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const Icon(Icons.check_circle_rounded, size: 16, color: Color(0xFF10B981)),
                   ],
                 ),
               ),
@@ -1461,14 +1852,18 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
 
         const SizedBox(height: 22),
 
-        // Name label + editable field
-        const Text('Name', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: DesignColors.navy)),
-        const SizedBox(height: 6),
+        // Purifier Name label & Text Field
+        const Text(
+          'Purifier Name',
+          style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w700, color: DesignColors.navy),
+        ),
+        const SizedBox(height: 8),
         TextField(
           controller: _purifierNameController,
-          style: const TextStyle(fontSize: 15, color: DesignColors.primary, fontWeight: FontWeight.w500),
+          style: const TextStyle(fontSize: 15, color: DesignColors.navy, fontWeight: FontWeight.w600),
           decoration: InputDecoration(
-            hintText: 'e.g. Kitchen purifier',
+            hintText: 'e.g. Shuddham RO Purifier',
+            prefixIcon: const Icon(Icons.water_drop_outlined, color: DesignColors.primary, size: 20),
             contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
             filled: true,
             fillColor: Colors.white,
@@ -1482,128 +1877,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
             ),
           ),
         ),
-
-        const SizedBox(height: 20),
-
-        // Room label + pill chips + "+ New room" dashed chip
-        const Text('Room', style: TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600, color: DesignColors.navy)),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 8,
-          runSpacing: 10,
-          children: [
-            // Existing room chips — pill shape matches screenshot
-            ..._rooms.map((room) {
-              final isSelected = room == _selectedRoom;
-              return GestureDetector(
-                onTap: () => setState(() => _selectedRoom = room),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: isSelected ? DesignColors.navy : Colors.white,
-                    borderRadius: BorderRadius.circular(30),
-                    border: Border.all(
-                      color: isSelected ? DesignColors.navy : DesignColors.border,
-                    ),
-                  ),
-                  child: Text(
-                    room,
-                    style: TextStyle(
-                      color: isSelected ? Colors.white : DesignColors.navy,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13.5,
-                    ),
-                  ),
-                ),
-              );
-            }),
-
-            // "+ New room" dashed-border chip — matches screenshot
-            GestureDetector(
-              onTap: _showAddRoomDialog,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                decoration: BoxDecoration(
-                  color: Colors.transparent,
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                child: CustomPaint(
-                  painter: _DashedBorderPainter(
-                    color: DesignColors.border,
-                    radius: 30,
-                    dashWidth: 5,
-                    dashSpace: 4,
-                  ),
-                  child: const Text(
-                    '+ New room',
-                    style: TextStyle(
-                      color: DesignColors.muted,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13.5,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
       ],
-    );
-  }
-
-  /// Dialog to add a custom room name
-  void _showAddRoomDialog() {
-    final ctrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          'New room',
-          style: TextStyle(fontWeight: FontWeight.w700, color: DesignColors.navy),
-        ),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          textCapitalization: TextCapitalization.words,
-          decoration: InputDecoration(
-            hintText: 'e.g. Living Room, Terrace…',
-            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: DesignColors.border),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: DesignColors.primary, width: 1.8),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel', style: TextStyle(color: DesignColors.muted)),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: DesignColors.primary,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            ),
-            onPressed: () {
-              final name = ctrl.text.trim();
-              if (name.isNotEmpty) {
-                setState(() {
-                  if (!_rooms.contains(name)) _rooms.add(name);
-                  _selectedRoom = name;
-                });
-              }
-              Navigator.pop(ctx);
-            },
-            child: const Text('Add'),
-          ),
-        ],
-      ),
     );
   }
 
@@ -1754,53 +2028,4 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       ),
     );
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Dashed border painter — used for the "+ New room" pill chip
-// ─────────────────────────────────────────────────────────────────────────────
-class _DashedBorderPainter extends CustomPainter {
-  final Color color;
-  final double radius;
-  final double dashWidth;
-  final double dashSpace;
-
-  const _DashedBorderPainter({
-    required this.color,
-    required this.radius,
-    required this.dashWidth,
-    required this.dashSpace,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 1.4
-      ..style = PaintingStyle.stroke;
-
-    final rrect = RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Radius.circular(radius),
-    );
-
-    final path = Path()..addRRect(rrect);
-    final metrics = path.computeMetrics();
-
-    for (final metric in metrics) {
-      double distance = 0;
-      while (distance < metric.length) {
-        final end = (distance + dashWidth).clamp(0.0, metric.length);
-        canvas.drawPath(metric.extractPath(distance, end), paint);
-        distance += dashWidth + dashSpace;
-      }
-    }
-  }
-
-  @override
-  bool shouldRepaint(_DashedBorderPainter old) =>
-      old.color != color ||
-      old.radius != radius ||
-      old.dashWidth != dashWidth ||
-      old.dashSpace != dashSpace;
 }

@@ -72,7 +72,8 @@ Future<void> showLogoutDialog(BuildContext context, {LogoutUseCase? logoutUseCas
               final currentToken = UserSession().token;
 
               // Clear local session and navigate to login screen
-              UserSession().clear();
+              await UserSession().clear();
+              if (!context.mounted) return;
               Navigator.of(context).pushAndRemoveUntil(
                 MaterialPageRoute(builder: (_) => const AuthScreen()),
                 (route) => false,

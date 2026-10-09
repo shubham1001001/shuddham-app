@@ -108,7 +108,7 @@ class _AuthScreenState extends State<AuthScreen> {
           email: _emailController.text.trim().isNotEmpty ? _emailController.text.trim() : null,
           password: _signUpPasswordController.text,
         ));
-        UserSession().setUser(user, loginInput: phoneInput);
+        await UserSession().setUser(user, loginInput: phoneInput);
       } else {
         final credential = _phoneOrEmailController.text.trim();
         final password = _loginPasswordController.text.trim();
@@ -117,7 +117,7 @@ class _AuthScreenState extends State<AuthScreen> {
           phoneOrEmail: credential,
           password: password,
         ));
-        UserSession().setUser(user, loginInput: credential);
+        await UserSession().setUser(user, loginInput: credential);
       }
 
       if (!mounted) return;
@@ -752,7 +752,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                       ),
 
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 20),
                     ],
                   ),
                 ),

@@ -72,6 +72,8 @@ enum ProvisioningFailureReason {
 /// - MTU: 64
 /// - Commands: `WSCAN`, `S,<ssid>`, `P,<password>`
 class ProvisioningService {
+  static final ProvisioningService instance = ProvisioningService();
+
   BluetoothDevice? _connectedDevice;
   BluetoothCharacteristic? _commChar;
   StreamSubscription<List<int>>? _notifySub;
@@ -79,6 +81,7 @@ class ProvisioningService {
 
   BluetoothDevice? get connectedDevice => _connectedDevice;
   Stream<String> get notifications => _notifications.stream;
+  bool get isConnected => _connectedDevice != null && _connectedDevice!.isConnected;
 
   /// Checks if required Bluetooth & Location permissions are granted.
   Future<bool> hasPermissions() async {
@@ -150,15 +153,14 @@ class ProvisioningService {
 
         debugPrint('[BLE Found] Name: "$name", AdvName: "$advName", DevName: "$devName", ID: "${r.device.remoteId}", UUIDs: ${r.advertisementData.serviceUuids.map((u) => u.str).toList()}, RSSI: ${r.rssi}');
 
+        final id = r.device.remoteId.str;
+        final existing = discoveredMap[id];
+
         final upper = name.toUpperCase();
         final hasMatchingName = upper.startsWith(BleConstants.bleNamePrefix) ||
             upper.startsWith(BleConstants.bleAltPrefix) ||
             upper.contains('SHUDDHAM') ||
-            upper.contains('SHD') ||
-            upper.contains('ESP32') ||
-            upper.contains('TDS') ||
-            upper.contains('WATER') ||
-            upper.contains('PURIFIER');
+            upper.contains('SHD');
 
         final hasMatchingService = r.advertisementData.serviceUuids.any((u) {
           final s = u.str.toLowerCase();
@@ -168,17 +170,26 @@ class ProvisioningService {
               s == BleConstants.bleGattServiceUuid.toLowerCase();
         });
 
+        // Strict filter: ONLY accept genuine Shuddham purifier devices
         final isPurifierDevice = hasMatchingName || hasMatchingService;
 
-        if (isPurifierDevice || (name.isNotEmpty && !name.contains('TV') && !name.contains('Band'))) {
-          final displayName = name.isNotEmpty
-              ? name
-              : 'SHUDDHAM-${r.device.remoteId.str.replaceAll(':', '').toUpperCase().substring(0, 4)}';
-          discoveredMap[r.device.remoteId.str] = DiscoveredBleDevice(
+        if (isPurifierDevice) {
+          // Retain real discovered name if subsequent packets have empty name
+          String displayName = name;
+          if (displayName.isEmpty && existing != null && existing.name.isNotEmpty) {
+            displayName = existing.name;
+          }
+          if (displayName.isEmpty) {
+            final macClean = id.replaceAll(':', '').replaceAll('-', '').toUpperCase();
+            final tail = macClean.length >= 4 ? macClean.substring(macClean.length - 4) : macClean;
+            displayName = 'SHUDDHAM-$tail';
+          }
+
+          discoveredMap[id] = DiscoveredBleDevice(
             device: r.device,
             name: displayName,
             rssi: r.rssi,
-            isPurifier: isPurifierDevice,
+            isPurifier: true,
           );
         }
       }
@@ -206,7 +217,7 @@ class ProvisioningService {
     return list;
   }
 
-  /// Connects to the ESP32, requests MTU 64, discovers Service 0x00FF and Char 0xFF01,
+  /// Connects to the ESP32, discovers Service 0x00FF and Char 0xFF01,
   /// and enables notification subscription sequentially.
   Future<void> connect(BluetoothDevice device) async {
     await disconnect();
@@ -235,23 +246,12 @@ class ProvisioningService {
       throw connectError;
     }
 
-    // Settle connection before requesting MTU
-    await Future.delayed(const Duration(milliseconds: 500));
+    // Settle connection completely before discovering services
+    await Future.delayed(const Duration(milliseconds: 1000));
 
-    // Request MTU 64 as specified in the firmware spec
-    if (Platform.isAndroid) {
-      try {
-        debugPrint('[BLE] 2. Requesting MTU 64...');
-        await device.requestMtu(64).timeout(const Duration(seconds: 3));
-        await Future.delayed(const Duration(milliseconds: 500));
-      } catch (e) {
-        debugPrint('[BLE] MTU request notice (continuing): $e');
-      }
-    }
-
-    debugPrint('[BLE] 3. Discovering services...');
+    debugPrint('[BLE] 2. Discovering services...');
     final services = await device.discoverServices();
-    await Future.delayed(const Duration(milliseconds: 500));
+    await Future.delayed(const Duration(milliseconds: 1200));
 
     BluetoothCharacteristic? writeChar;
     BluetoothCharacteristic? notifyChar;
@@ -261,7 +261,8 @@ class ProvisioningService {
       debugPrint('[BLE Discovery] Found Service: $sUuid');
       for (final c in s.characteristics) {
         final cUuid = c.uuid.str.toLowerCase();
-        debugPrint('[BLE Discovery]   -> Char: $cUuid (write: ${c.properties.write}, writeWithoutResponse: ${c.properties.writeWithoutResponse}, notify: ${c.properties.notify}, indicate: ${c.properties.indicate})');
+        final descUuids = c.descriptors.map((d) => d.uuid.str.toLowerCase()).toList();
+        debugPrint('[BLE Discovery]   -> Char: $cUuid (write: ${c.properties.write}, writeWithoutResp: ${c.properties.writeWithoutResponse}, notify: ${c.properties.notify}) Descriptors: $descUuids');
         if (sUuid.contains('00ff') || sUuid == BleConstants.bleGattServiceUuid.toLowerCase()) {
           if (cUuid.contains('ff01') || cUuid == BleConstants.bleCharUuid.toLowerCase()) {
             writeChar = c;
@@ -315,41 +316,133 @@ class ProvisioningService {
       });
 
       if (activeNotifyChar.properties.notify || activeNotifyChar.properties.indicate) {
-        debugPrint('[BLE] 4. Enabling notifications on characteristic: ${activeNotifyChar.uuid.str}...');
+        debugPrint('[BLE] 3. Enabling notifications on characteristic: ${activeNotifyChar.uuid.str}...');
         try {
-          await activeNotifyChar.setNotifyValue(true, timeout: 3);
+          await Future.delayed(const Duration(milliseconds: 1000));
+          await activeNotifyChar.setNotifyValue(true, timeout: 15);
           debugPrint('[BLE] Notifications listener registered.');
+          await Future.delayed(const Duration(milliseconds: 1000));
         } catch (e) {
-          debugPrint('[BLE] setNotifyValue notice: $e');
+          debugPrint('[BLE] setNotifyValue notice (settling GATT queue): $e');
+          // If setNotifyValue timed out or had an error, wait for Android GATT queue to clear
+          await Future.delayed(const Duration(milliseconds: 2500));
         }
       }
     }
 
-    await Future.delayed(const Duration(milliseconds: 300));
-    debugPrint('[BLE] 5. Connected and ready for commands.');
+    await Future.delayed(const Duration(milliseconds: 800));
+    debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 🔵 [BLUETOOTH CONNECTED] Purifier: ${_connectedDevice?.remoteId.str}
+║ 📡 BLE Service: 0x00FF | Characteristic: 0xFF01
+║ ✅ Status: Ready to receive commands (WSCAN / Provisioning)
+╚══════════════════════════════════════════════════════════════╝''');
   }
 
-  /// Writes ASCII command to BLE Characteristic.
-  Future<void> _writeAscii(String command) async {
+  /// Writes ASCII command to BLE Characteristic with robust queue-busy retry logic.
+  Future<void> _writeAscii(String command, {int? timeoutSeconds}) async {
     if (_commChar == null) throw Exception('Device not connected over BLE.');
-    debugPrint('[BLE Write] >>> $command');
+    final canWrite = _commChar!.properties.write;
+    final canWriteWithoutResp = _commChar!.properties.writeWithoutResponse;
+    final bool useWithoutResponse = !canWrite && canWriteWithoutResp;
+    final int timeout = timeoutSeconds ?? BleConstants.writeTimeout.inSeconds;
+
+    debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 📤 [BLE COMMAND TRANSMITTED] >>> "$command" (withoutResponse: $useWithoutResponse, timeout: ${timeout}s)
+╚══════════════════════════════════════════════════════════════╝''');
     final bytes = utf8.encode(command);
-    final withoutResponse = !_commChar!.properties.write && _commChar!.properties.writeWithoutResponse;
 
     Object? lastError;
-    for (int attempt = 1; attempt <= 2; attempt++) {
+    for (int attempt = 1; attempt <= 3; attempt++) {
       try {
-        await Future.delayed(Duration(milliseconds: attempt * 200));
-        await _commChar!.write(bytes, withoutResponse: withoutResponse, timeout: BleConstants.writeTimeout.inSeconds);
-        debugPrint('[BLE Write Success] >>> $command');
+        if (attempt > 1) {
+          await Future.delayed(Duration(milliseconds: attempt * 300));
+        }
+        await _commChar!.write(
+          bytes,
+          withoutResponse: useWithoutResponse,
+          timeout: timeout,
+        );
+        debugPrint('✅ [BLE COMMAND ACKNOWLEDGED] >>> "$command"');
         return;
       } catch (e) {
         lastError = e;
+        final errStr = e.toString();
         debugPrint('[BLE Write] Attempt $attempt failed: $e');
-        await Future.delayed(const Duration(milliseconds: 1000));
+        if (errStr.contains('201') || errStr.contains('BUSY') || errStr.contains('busy')) {
+          await Future.delayed(Duration(milliseconds: 600 * attempt));
+        } else {
+          await Future.delayed(const Duration(milliseconds: 400));
+        }
       }
     }
     if (lastError != null) throw lastError;
+  }
+
+  /// Sends a raw command (e.g. "F,0", "F,1") to the connected purifier over BLE.
+  Future<bool> sendRawCommand(String command) async {
+    if (_commChar == null) return false;
+    try {
+      await _writeAscii(command);
+      return true;
+    } catch (e) {
+      debugPrint('[BLE Command Error] $e');
+      return false;
+    }
+  }
+
+  /// Attempts to send command over BLE. If not already connected,
+  /// tries to connect to the target device or scans for the purifier in range.
+  Future<bool> sendBleCommandAuto({String? targetDeviceId, required String command}) async {
+    // 1. If already connected, send directly
+    if (_commChar != null && _connectedDevice != null && _connectedDevice!.isConnected) {
+      return await sendRawCommand(command);
+    }
+
+    // 2. If Bluetooth is turned off, skip gracefully
+    try {
+      final state = await FlutterBluePlus.adapterState.first;
+      if (state != BluetoothAdapterState.on) {
+        debugPrint('[BLE] Bluetooth is off, skipping BLE command');
+        return false;
+      }
+    } catch (_) {
+      return false;
+    }
+
+    // 3. Try connecting directly by ID if provided
+    if (targetDeviceId != null && targetDeviceId.isNotEmpty) {
+      try {
+        debugPrint('[BLE Auto-Connect] Trying direct connect to: $targetDeviceId');
+        final bleDevice = BluetoothDevice.fromId(targetDeviceId);
+        await connect(bleDevice).timeout(const Duration(seconds: 4));
+        if (_commChar != null) {
+          return await sendRawCommand(command);
+        }
+      } catch (e) {
+        debugPrint('[BLE Direct Connect Error] $e');
+      }
+    }
+
+    // 4. Quick scan (3 seconds) for any nearby Shuddham purifier
+    try {
+      debugPrint('[BLE Quick Scan] Scanning for nearby purifier...');
+      final discovered = await scanDevices(timeout: const Duration(seconds: 3));
+      for (final d in discovered) {
+        if (d.isPurifier || d.name.toUpperCase().contains('SHUDDHAM') || d.name.toUpperCase().startsWith('SHD-')) {
+          debugPrint('[BLE Quick Scan] Found purifier: ${d.name} (${d.device.remoteId}). Connecting...');
+          await connect(d.device).timeout(const Duration(seconds: 4));
+          if (_commChar != null) {
+            return await sendRawCommand(command);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[BLE Quick Scan Error] $e');
+    }
+
+    return false;
   }
 
   /// Scans for Wi-Fi networks visible to the purifier by sending "WSCAN".
@@ -364,49 +457,128 @@ class ProvisioningService {
     final seenSsids = <String>{};
     final completer = Completer<List<BleWifiNetwork>>();
     int expectedCount = -1;
+    Timer? settleTimer;
+
+    String currentRawBuffer = '';
+    int currentIndex = 0;
+
+    void finalizeCurrentEntry() {
+      if (currentRawBuffer.trim().isEmpty) return;
+      String text = currentRawBuffer.trim();
+      int sec = 1;
+
+      // Extract trailing security flag like [1], [0], [2]
+      final secMatch = RegExp(r'\[(\d+)\]\s*$').firstMatch(text);
+      if (secMatch != null) {
+        sec = int.tryParse(secMatch.group(1) ?? '1') ?? 1;
+        text = text.substring(0, secMatch.start).trim();
+      }
+      // Remove any leftover bracket fragments
+      text = text.replaceAll(RegExp(r'\[\d*\]?$'), '').trim();
+
+      // Reject non-SSID noise tokens
+      if (text.isNotEmpty &&
+          text != '[1]' &&
+          text != '[0]' &&
+          text != ']' &&
+          !text.toLowerCase().contains('found wifi') &&
+          !seenSsids.contains(text.toLowerCase())) {
+        seenSsids.add(text.toLowerCase());
+        final realIdx = currentIndex > 0 ? currentIndex : networks.length + 1;
+        networks.add(BleWifiNetwork(index: realIdx, ssid: text, security: sec));
+        debugPrint('📶 [PURIFIER WI-FI READY] #$realIdx: "$text" (${sec == 0 ? "Open" : "Secured"})');
+      }
+      currentRawBuffer = '';
+    }
 
     final sub = _notifications.stream.listen((msg) {
       debugPrint('[BLE Scan Msg] $msg');
-      if (msg.startsWith('Found WiFi:')) {
-        final countStr = msg.replaceFirst('Found WiFi:', '').trim();
+      final trimmed = msg.trim();
+      if (trimmed.isEmpty) return;
+
+      if (trimmed.startsWith('Found WiFi:')) {
+        finalizeCurrentEntry();
+        final countStr = trimmed.replaceFirst('Found WiFi:', '').trim();
         expectedCount = int.tryParse(countStr) ?? -1;
-        debugPrint('[BLE] Expected Wi-Fi networks: $expectedCount');
+        debugPrint('📊 [PURIFIER WI-FI SCAN] Hardware reported total networks: $expectedCount');
         if (expectedCount == 0 && !completer.isCompleted) {
+          settleTimer?.cancel();
           completer.complete([]);
         }
-      } else if (msg.startsWith('[') && msg.contains(']:')) {
-        final closeBracketIdx = msg.indexOf(']:');
-        final idxStr = msg.substring(1, closeBracketIdx);
-        final idx = int.tryParse(idxStr) ?? networks.length + 1;
-        String rest = msg.substring(closeBracketIdx + 2).trim();
+        return;
+      }
 
-        int sec = 1; // Default secured
-        final secMatch = RegExp(r'\[(\d+)\]$').firstMatch(rest);
-        if (secMatch != null) {
-          sec = int.tryParse(secMatch.group(1) ?? '1') ?? 1;
-          rest = rest.substring(0, secMatch.start).trim();
+      // Check if this line starts a NEW numbered network entry e.g. "[1]:", "[12]:"
+      if (trimmed.startsWith('[') && trimmed.contains(']:')) {
+        finalizeCurrentEntry();
+        final closeIdx = trimmed.indexOf(']:');
+        currentIndex = int.tryParse(trimmed.substring(1, closeIdx)) ?? (networks.length + 1);
+        currentRawBuffer = trimmed.substring(closeIdx + 2).trim();
+
+        // If the entry was short and completed in this single packet (e.g. "tulsi[2]")
+        if (RegExp(r'\[\d+\]\s*$').hasMatch(currentRawBuffer)) {
+          finalizeCurrentEntry();
         }
-
-        final ssid = rest;
-        if (ssid.isNotEmpty && !seenSsids.contains(ssid)) {
-          seenSsids.add(ssid);
-          networks.add(BleWifiNetwork(index: idx, ssid: ssid, security: sec));
-          debugPrint('[BLE] Parsed Network #$idx: "$ssid" (security: $sec)');
+      } else if (currentRawBuffer.isNotEmpty) {
+        // Continuation chunk of the current network (e.g. "IES_4G[1]" or "]" or "[1]")
+        currentRawBuffer += trimmed;
+        if (RegExp(r'\[\d+\]\s*$').hasMatch(currentRawBuffer) || currentRawBuffer.endsWith(']')) {
+          finalizeCurrentEntry();
         }
+      } else if (RegExp(r'^\d+[\:\.\-]\s*').hasMatch(trimmed)) {
+        finalizeCurrentEntry();
+        final match = RegExp(r'^\d+[\:\.\-]\s*').firstMatch(trimmed)!;
+        currentIndex = int.tryParse(trimmed.substring(0, match.end - 1).replaceAll(RegExp(r'[^\d]'), '')) ?? (networks.length + 1);
+        currentRawBuffer = trimmed.substring(match.end).trim();
+        if (RegExp(r'\[\d+\]\s*$').hasMatch(currentRawBuffer)) {
+          finalizeCurrentEntry();
+        }
+      }
 
-        if (expectedCount > 0 && networks.length >= expectedCount && !completer.isCompleted) {
+      settleTimer?.cancel();
+      settleTimer = Timer(const Duration(milliseconds: 2500), () {
+        finalizeCurrentEntry();
+        if (!completer.isCompleted && networks.isNotEmpty) {
           completer.complete(networks);
         }
+      });
+
+      if (expectedCount > 0 && networks.length >= expectedCount && !completer.isCompleted) {
+        finalizeCurrentEntry();
+        settleTimer?.cancel();
+        completer.complete(networks);
       }
     });
 
     try {
-      await _writeAscii('WSCAN');
-      return await completer.future.timeout(
+      debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 🔍 [HARDWARE WI-FI SCAN STARTED] Sending "WSCAN" to Purifier...
+╚══════════════════════════════════════════════════════════════╝''');
+      try {
+        await _writeAscii('WSCAN', timeoutSeconds: 25);
+      } catch (writeErr) {
+        debugPrint('[BLE WSCAN Write Notice] $writeErr');
+      }
+
+      final result = await completer.future.timeout(
         timeout,
-        onTimeout: () => networks, // return whatever was collected
+        onTimeout: () {
+          finalizeCurrentEntry();
+          return networks;
+        },
       );
+
+      final listSummary = result.map((n) => '║   • [${n.index}] ${n.ssid} (${n.isOpen ? "Open" : "Secured"})').join('\n');
+      debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 📋 [PURIFIER WI-FI SCAN COMPLETE]
+║ 🔢 Total Networks Visible to Hardware: ${result.length}
+$listSummary
+╚══════════════════════════════════════════════════════════════╝''');
+      return result;
     } finally {
+      settleTimer?.cancel();
       await sub.cancel();
     }
   }
@@ -423,17 +595,39 @@ class ProvisioningService {
       throw ArgumentError('SSID must not be empty.');
     }
 
+    debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 🚀 [WI-FI PROVISIONING STARTED]
+║ 📶 Target SSID: "$cleanSsid"
+║ 🔑 Password: ${cleanPass.isEmpty ? "(None / Open)" : "********"}
+╚══════════════════════════════════════════════════════════════╝''');
+
     final completer = Completer<bool>();
+
+    if (!isConnected) {
+      throw StateError('Purifier Bluetooth is not connected.');
+    }
+
+    bool credentialsDelivered = false;
 
     final sub = _notifications.stream.listen((msg) {
       debugPrint('[BLE Provision Msg] $msg');
       final lower = msg.toLowerCase();
       if ((lower.contains('conected') || lower.contains('connected') || lower.contains('wifi ok') || lower.contains('ip:')) &&
           !lower.contains('not')) {
-        debugPrint('[BLE] Wi-Fi connection successful on ESP32!');
+        debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 🎉 [PURIFIER WI-FI CONNECTED SUCCESSFULLY]
+║ 📶 Network: "$cleanSsid"
+║ ✅ ESP32 Purifier has connected to Wi-Fi!
+╚══════════════════════════════════════════════════════════════╝''');
         if (!completer.isCompleted) completer.complete(true);
       } else if (lower.contains('not conected') || lower.contains('not connected') || lower.contains('fail') || lower.contains('error')) {
-        debugPrint('[BLE] Wi-Fi connection failed on ESP32!');
+        debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ ❌ [PURIFIER WI-FI CONNECTION FAILED]
+║ ⚠️ ESP32 returned: Not Connected / Failed
+╚══════════════════════════════════════════════════════════════╝''');
         if (!completer.isCompleted) completer.complete(false);
       }
     });
@@ -442,13 +636,23 @@ class ProvisioningService {
     if (_connectedDevice != null) {
       connSub = _connectedDevice!.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected) {
-          debugPrint('[BLE] Device disconnected (expected behavior when ESP32 joins Wi-Fi)');
-          Future.delayed(const Duration(milliseconds: 1000), () {
+          if (credentialsDelivered) {
+            debugPrint('''
+╔══════════════════════════════════════════════════════════════╗
+║ 📡 [BLE DISCONNECTED - EXPECTED ON WI-FI JOIN]
+║ Firmware turned off BLE to enter Wi-Fi MQTT mode.
+╚══════════════════════════════════════════════════════════════╝''');
+            Future.delayed(const Duration(milliseconds: 1000), () {
+              if (!completer.isCompleted) {
+                completer.complete(true);
+              }
+            });
+          } else {
+            debugPrint('⚠️ [BLE] Disconnected BEFORE credentials were fully transmitted.');
             if (!completer.isCompleted) {
-              debugPrint('[BLE] Successfully connected: Firmware disabled BLE as per spec.');
-              completer.complete(true);
+              completer.complete(false);
             }
-          });
+          }
         }
       });
     }
@@ -461,12 +665,15 @@ class ProvisioningService {
       // 2. Send Password (or 'none' if empty)
       final passToSend = cleanPass.isEmpty ? 'none' : cleanPass;
       await _writeAndExpect('P,$passToSend', (m) => m.toLowerCase().contains('pass'));
+      
+      // Both credentials successfully transmitted
+      credentialsDelivered = true;
 
       // 3. Wait for connection result
       return await completer.future.timeout(
         timeout,
         onTimeout: () {
-          debugPrint('[BLE] Timeout waiting for WiFi connection result from ESP32');
+          debugPrint('⚠️ [BLE] Timeout waiting for WiFi connection result from ESP32');
           return false;
         },
       );
@@ -486,8 +693,8 @@ class ProvisioningService {
     try {
       await _writeAscii(command);
       await c.future.timeout(timeout);
-    } catch (e) {
-      debugPrint('[BLE] Notice waiting for response to $command: $e');
+    } on TimeoutException {
+      debugPrint('[BLE] Timed out waiting for ack to $command (command was transmitted)');
     } finally {
       await sub.cancel();
     }

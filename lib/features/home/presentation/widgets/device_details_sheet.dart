@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import '../../../../core/services/device_storage_service.dart';
+import '../../../../core/services/telemetry_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../data/models/device_model.dart';
 import '../../domain/entities/device_entity.dart';
 
 class DeviceDetailsSheet extends StatefulWidget {
@@ -38,6 +41,87 @@ class DeviceDetailsSheet extends StatefulWidget {
 
 class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
   bool _isFlushing = false;
+  bool _isSyncing = false;
+  late DeviceEntity _device;
+
+  @override
+  void initState() {
+    super.initState();
+    _device = widget.device;
+  }
+
+  @override
+  void didUpdateWidget(covariant DeviceDetailsSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.device != widget.device) {
+      _device = widget.device;
+    }
+  }
+
+  String _formatSheetTime(DateTime? dt) {
+    if (dt == null) return 'No data received yet';
+    final day = dt.day.toString().padLeft(2, '0');
+    final month = dt.month.toString().padLeft(2, '0');
+    final year = dt.year;
+    final hour12 = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final second = dt.second.toString().padLeft(2, '0');
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$day/$month/$year • $hour12:$minute:$second $period';
+  }
+
+  Future<void> _syncTelemetryInSheet() async {
+    setState(() => _isSyncing = true);
+    try {
+      final records = await TelemetryService.instance.fetchAllTelemetry();
+      if (records.isNotEmpty) {
+        DeviceModel modelToMatch;
+        if (_device is DeviceModel) {
+          modelToMatch = _device as DeviceModel;
+        } else {
+          modelToMatch = DeviceModel(
+            id: _device.id,
+            name: _device.name,
+            model: _device.model,
+            type: _device.type,
+            serialNumber: _device.serialNumber,
+            location: _device.location,
+            tdsPpm: _device.tdsPpm,
+            filterLifePercentage: _device.filterLifePercentage,
+            lastSync: _device.lastSync,
+            totalLitersPurified: _device.totalLitersPurified,
+            inletTdsPpm: _device.inletTdsPpm,
+            temperature: _device.temperature,
+            mode: _device.mode,
+          );
+        }
+        final match = TelemetryService.instance.findMatchingRecord(modelToMatch, records);
+        if (match != null) {
+          final updated = TelemetryService.instance.applyTelemetryToDevice(modelToMatch, match);
+          await DeviceStorageService.saveOrUpdateDevice(updated);
+          if (mounted) {
+            setState(() {
+              _device = updated;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Live sensor updated: Output ${_device.tdsPpm} PPM, Input ${_device.inletTdsPpm ?? 58} PPM!'),
+                backgroundColor: AppTheme.accentGreen,
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                margin: const EdgeInsets.only(bottom: 24, left: 16, right: 16),
+              ),
+            );
+          }
+        }
+      }
+      widget.onSync();
+    } catch (e) {
+      debugPrint('[Sheet sync error] $e');
+    } finally {
+      if (mounted) setState(() => _isSyncing = false);
+    }
+  }
 
   void _runFlushCycle() async {
     setState(() {
@@ -79,7 +163,7 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text('Unpair Device?'),
         content: Text(
-          'Are you sure you want to disconnect "${widget.device.name}"? You will stop receiving live water quality alerts for this unit.',
+          'Are you sure you want to disconnect "${_device.name}"? You will stop receiving live water quality alerts for this unit.',
           style: const TextStyle(fontSize: 13, color: AppTheme.textMuted),
         ),
         actions: [
@@ -139,7 +223,7 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.device.name,
+                    _device.name,
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -148,7 +232,9 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'Serial: ${widget.device.serialNumber} • ${widget.device.location}',
+                    _device.location.isNotEmpty
+                        ? 'Serial: ${_device.serialNumber} • ${_device.location}'
+                        : 'Serial: ${_device.serialNumber}',
                     style: const TextStyle(fontSize: 12, color: AppTheme.textMuted),
                   ),
                 ],
@@ -206,28 +292,120 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                                 borderRadius: BorderRadius.circular(12),
                               ),
                               child: Text(
-                                widget.device.isOnline ? '● LIVE SENSOR' : 'OFFLINE',
+                                _device.isOnline ? '● LIVE SENSOR' : 'OFFLINE',
                                 style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
                               ),
                             ),
                           ],
                         ),
                         const SizedBox(height: 12),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            _buildTelemetryStat('Outlet TDS', '${widget.device.tdsPpm} PPM', 'Purified Safe'),
-                            Container(width: 1, height: 40, color: Colors.white24),
-                            _buildTelemetryStat('Inlet TDS', '480 PPM', 'Raw Supply'),
-                            Container(width: 1, height: 40, color: Colors.white24),
-                            _buildTelemetryStat('Filtration', '83%', 'Reduction'),
-                          ],
+                        Builder(
+                          builder: (context) {
+                            final outlet = _device.tdsPpm;
+                            final inlet = _device.inletTdsPpm;
+                            final temp = _device.temperature;
+                            String reductionStr = 'Optimal';
+                            if (inlet != null && inlet > 0) {
+                              final red = ((1.0 - (outlet / inlet)) * 100).clamp(0, 100).round();
+                              reductionStr = '$red%';
+                            }
+
+                            return Column(
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    _buildTelemetryStat('Outlet TDS', '$outlet PPM', 'Purified Safe'),
+                                    Container(width: 1, height: 40, color: Colors.white24),
+                                    _buildTelemetryStat(
+                                      'Inlet TDS',
+                                      inlet != null ? '$inlet PPM' : '—',
+                                      'Raw Supply',
+                                    ),
+                                    Container(width: 1, height: 40, color: Colors.white24),
+                                    _buildTelemetryStat('Filtration', reductionStr, 'Reduction'),
+                                  ],
+                                ),
+                                if (temp != null || _device.mode != null) ...[
+                                  const SizedBox(height: 10),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(alpha: 0.15),
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        if (temp != null) ...[
+                                          const Icon(Icons.thermostat_rounded, size: 14, color: Colors.white),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'Water Temp: ${temp.toStringAsFixed(1)}°C',
+                                            style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                                          ),
+                                        ],
+                                        if (temp != null && _device.mode != null) ...[
+                                          const SizedBox(width: 12),
+                                          const Text('•', style: TextStyle(color: Colors.white60)),
+                                          const SizedBox(width: 12),
+                                        ],
+                                        if (_device.mode != null) ...[
+                                          Text(
+                                            'Mode: ${_device.mode}',
+                                            style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600),
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            );
+                          },
                         ),
                       ],
                     ),
                   ),
 
-                  const SizedBox(height: 18),
+                  const SizedBox(height: 12),
+
+                  // Last Telemetry Timestamp Banner
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE2E8F0)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.schedule_rounded, size: 15, color: AppTheme.royalBlue),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Last Reading: ',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF475569),
+                          ),
+                        ),
+                        Expanded(
+                          child: Text(
+                            _formatSheetTime(_device.lastReadingTime),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF0F172A),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
 
                   // Filter Health Breakdown
                   const Text(
@@ -238,7 +416,7 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
 
                   _buildFilterProgress('1. Sediment Pre-Filter', 0.92, '92% • Healthy'),
                   _buildFilterProgress('2. Activated Carbon Block', 0.88, '88% • Good'),
-                  _buildFilterProgress('3. Reverse Osmosis (RO) Membrane', widget.device.filterLifePercentage / 100.0, '${widget.device.filterLifePercentage}% • Optimal'),
+                  _buildFilterProgress('3. Reverse Osmosis (RO) Membrane', _device.filterLifePercentage / 100.0, '${_device.filterLifePercentage}% • Optimal'),
                   _buildFilterProgress('4. Mineraliser & UV Polish', 0.95, '95% • Pristine'),
 
                   const SizedBox(height: 16),
@@ -268,12 +446,15 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                       const SizedBox(width: 10),
                       Expanded(
                         child: ElevatedButton.icon(
-                          onPressed: () {
-                            widget.onSync();
-                            Navigator.of(context).pop();
-                          },
-                          icon: const Icon(Icons.sync_rounded, size: 18),
-                          label: const Text('Sync Telemetry'),
+                          onPressed: _isSyncing ? null : _syncTelemetryInSheet,
+                          icon: _isSyncing
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.sync_rounded, size: 18),
+                          label: Text(_isSyncing ? 'Syncing...' : 'Sync Telemetry'),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: AppTheme.royalBlue,
                             foregroundColor: Colors.white,

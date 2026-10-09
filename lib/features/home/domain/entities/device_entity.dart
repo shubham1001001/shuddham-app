@@ -10,6 +10,12 @@ class DeviceEntity {
   final int filterLifePercentage;
   final String lastSync;
   final double totalLitersPurified;
+  final double? temperature;
+  final int? inletTdsPpm;
+  final String? mode;
+  final int? tdsRange;
+  final String? fan;
+  final DateTime? lastReadingTime;
 
   const DeviceEntity({
     required this.id,
@@ -23,5 +29,11 @@ class DeviceEntity {
     this.filterLifePercentage = 85,
     this.lastSync = 'Just now',
     this.totalLitersPurified = 142.5,
+    this.temperature,
+    this.inletTdsPpm,
+    this.mode,
+    this.tdsRange,
+    this.fan,
+    this.lastReadingTime,
   });
 }

@@ -6,14 +6,20 @@ class DeviceCard extends StatelessWidget {
   final DeviceEntity device;
   final bool isSelected;
   final VoidCallback onSelect;
-  final VoidCallback onDetails;
+  final VoidCallback? onDetails;
+  final double? width;
+  final double? height;
+  final EdgeInsetsGeometry? margin;
 
   const DeviceCard({
     super.key,
     required this.device,
     required this.isSelected,
     required this.onSelect,
-    required this.onDetails,
+    this.onDetails,
+    this.width,
+    this.height,
+    this.margin,
   });
 
   IconData _getDeviceIcon(String type) {
@@ -47,14 +53,25 @@ class DeviceCard extends StatelessWidget {
     return 'High';
   }
 
+  String _formatDeviceTime(DateTime dt) {
+    final day = dt.day.toString().padLeft(2, '0');
+    final month = dt.month.toString().padLeft(2, '0');
+    final year = dt.year;
+    final hour12 = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    return '$day/$month/$year, $hour12:$minute $period';
+  }
+
   @override
   Widget build(BuildContext context) {
     final tdsColor = _getTdsColor(device.tdsPpm);
     final tdsStatus = _getTdsStatus(device.tdsPpm);
 
     return Container(
-      width: 250,
-      margin: const EdgeInsets.only(right: 14),
+      width: width ?? 260,
+      height: height,
+      margin: margin ?? const EdgeInsets.only(right: 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
@@ -78,17 +95,17 @@ class DeviceCard extends StatelessWidget {
           onTap: onSelect,
           borderRadius: BorderRadius.circular(20),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            padding: const EdgeInsets.all(14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // Top Row: Icon + Online Pill + Details Button
+                // Top Row: Icon + Name / Status + 3 dots
                 Row(
                   children: [
                     Container(
-                      width: 38,
-                      height: 38,
+                      width: 40,
+                      height: 40,
                       decoration: BoxDecoration(
                         gradient: LinearGradient(
                           colors: isSelected
@@ -97,127 +114,127 @@ class DeviceCard extends StatelessWidget {
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
                         ),
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(12),
                       ),
                       child: Icon(
                         _getDeviceIcon(device.type),
                         color: isSelected ? Colors.white : AppTheme.royalBlue,
-                        size: 19,
+                        size: 20,
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 10),
                     Expanded(
-                      child: Row(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(
-                            width: 7,
-                            height: 7,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: device.isOnline ? AppTheme.accentGreen : Colors.grey,
-                            ),
-                          ),
-                          const SizedBox(width: 5),
                           Text(
-                            device.isOnline ? 'Online' : 'Offline',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: device.isOnline ? AppTheme.accentGreen : AppTheme.textMuted,
+                            device.name,
+                            style: const TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: AppTheme.textDark,
                             ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              Container(
+                                width: 7,
+                                height: 7,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: device.isOnline ? AppTheme.accentGreen : Colors.grey,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Text(
+                                device.isOnline ? 'Online' : 'Offline',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: device.isOnline ? AppTheme.accentGreen : AppTheme.textMuted,
+                                ),
+                              ),
+                              if (device.lastReadingTime != null) ...[
+                                const SizedBox(width: 5),
+                                const Text('•', style: TextStyle(fontSize: 10, color: Color(0xFF94A3B8))),
+                                const SizedBox(width: 5),
+                                Expanded(
+                                  child: Text(
+                                    _formatDeviceTime(device.lastReadingTime!),
+                                    style: const TextStyle(
+                                      fontSize: 10.5,
+                                      fontWeight: FontWeight.w500,
+                                      color: Color(0xFF64748B),
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ],
                           ),
                         ],
                       ),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.more_vert_rounded, size: 18, color: AppTheme.textMuted),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
-                      tooltip: 'Device Settings',
-                      onPressed: onDetails,
-                    ),
                   ],
                 ),
 
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
 
-                // Device Name & Location
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      device.name,
-                      style: const TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.bold,
-                        color: AppTheme.textDark,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${device.location} • ${device.model}',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        color: AppTheme.textMuted,
-                        fontWeight: FontWeight.w500,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 8),
-
-                // Metrics Row: TDS & Filter Life
+                // Bottom Row: TDS Metric Chip + Status Badge
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
                   decoration: BoxDecoration(
                     color: const Color(0xFFF8FAFC),
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(12),
                     border: Border.all(color: const Color(0xFFF1F5F9)),
                   ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      Row(
                         children: [
-                          const Text(
-                            'Water TDS',
-                            style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted),
+                          Text(
+                            device.inletTdsPpm != null ? 'Pure: ' : 'TDS: ',
+                            style: const TextStyle(fontSize: 11, color: AppTheme.textMuted, fontWeight: FontWeight.w500),
                           ),
-                          const SizedBox(height: 1),
-                          Row(
-                            children: [
-                              Text(
-                                '${device.tdsPpm}',
-                                style: TextStyle(
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.bold,
-                                  color: tdsColor,
-                                ),
+                          Text(
+                            '${device.tdsPpm}',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: tdsColor,
+                            ),
+                          ),
+                          if (device.inletTdsPpm != null) ...[
+                            Text(
+                              ' | Raw: ${device.inletTdsPpm}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF64748B),
                               ),
-                              const Text(
-                                ' PPM',
-                                style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted),
-                              ),
-                            ],
+                            ),
+                          ],
+                          const Text(
+                            ' PPM',
+                            style: TextStyle(fontSize: 10, color: AppTheme.textMuted, fontWeight: FontWeight.w500),
                           ),
                         ],
                       ),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                         decoration: BoxDecoration(
                           color: tdsColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(6),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(
                           tdsStatus,
                           style: TextStyle(
-                            fontSize: 9.5,
+                            fontSize: 10,
                             fontWeight: FontWeight.bold,
                             color: tdsColor,
                           ),
@@ -225,42 +242,6 @@ class DeviceCard extends StatelessWidget {
                       ),
                     ],
                   ),
-                ),
-
-                const SizedBox(height: 8),
-
-                // Filter Life Indicator
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'Filter Lifespan',
-                          style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted, fontWeight: FontWeight.w500),
-                        ),
-                        Text(
-                          '${device.filterLifePercentage}%',
-                          style: const TextStyle(fontSize: 10.5, fontWeight: FontWeight.bold, color: AppTheme.textDark),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: device.filterLifePercentage / 100.0,
-                        minHeight: 4.5,
-                        backgroundColor: const Color(0xFFE2E8F0),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          device.filterLifePercentage > 40
-                              ? AppTheme.royalBlue
-                              : (device.filterLifePercentage > 20 ? AppTheme.accentOrange : const Color(0xFFEF4444)),
-                        ),
-                      ),
-                    ),
-                  ],
                 ),
               ],
             ),

@@ -26,13 +26,13 @@ class AddDeviceCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
           splashColor: AppTheme.royalBlue.withValues(alpha: 0.1),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Container(
-                  width: 48,
-                  height: 48,
+                  width: 38,
+                  height: 38,
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
                       colors: [AppTheme.royalBlue, Color(0xFF00B4D8)],
@@ -42,38 +42,38 @@ class AddDeviceCard extends StatelessWidget {
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: AppTheme.royalBlue.withValues(alpha: 0.3),
-                        blurRadius: 10,
-                        offset: const Offset(0, 4),
+                        color: AppTheme.royalBlue.withValues(alpha: 0.25),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
                       ),
                     ],
                   ),
                   child: const Icon(
                     Icons.add_rounded,
                     color: Colors.white,
-                    size: 28,
+                    size: 22,
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
                 const Text(
                   'Add Device',
                   style: TextStyle(
-                    fontSize: 13,
+                    fontSize: 12.5,
                     fontWeight: FontWeight.bold,
                     color: AppTheme.royalBlue,
                   ),
                   textAlign: TextAlign.center,
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 2),
                 const Text(
-                  'Pair Purifier or TDS Sensor',
+                  'Pair Purifier',
                   style: TextStyle(
                     fontSize: 10,
                     color: AppTheme.textMuted,
                     fontWeight: FontWeight.w500,
                   ),
                   textAlign: TextAlign.center,
-                  maxLines: 2,
+                  maxLines: 1,
                 ),
               ],
             ),

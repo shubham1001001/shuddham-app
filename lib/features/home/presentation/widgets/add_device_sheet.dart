@@ -34,24 +34,15 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
 
   // Manual Form State
   final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController(text: 'Kitchen RO Purifier');
+  final _nameController = TextEditingController(text: 'Shuddham RO Purifier');
   final _serialController = TextEditingController(text: 'SHD-RO-8492');
   String _selectedType = 'RO Purifier';
-  String _selectedLocation = 'Kitchen';
 
   final List<String> _deviceTypes = [
     'RO Purifier',
     'TDS Meter',
     'Tank Sensor',
     'UV Filter',
-  ];
-
-  final List<String> _locations = [
-    'Kitchen',
-    'Rooftop Tank',
-    'Utility Room',
-    'Dining Room',
-    'Office',
   ];
 
   final List<Map<String, dynamic>> _radarDevices = [];
@@ -386,11 +377,11 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
             onPressed: () {
               final newDevice = DeviceModel(
                 id: 'dev-${DateTime.now().millisecondsSinceEpoch}',
-                name: 'Kitchen Mineral RO',
+                name: 'Shuddham Mineral RO',
                 model: 'Shuddham RO-7S Pro',
                 type: 'RO Purifier',
                 serialNumber: 'SHD-QR-${DateTime.now().millisecondsSinceEpoch % 10000}',
-                location: 'Kitchen',
+                location: '',
                 isOnline: true,
                 tdsPpm: 82,
                 filterLifePercentage: 88,
@@ -544,7 +535,7 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${dev['model']} • ${dev['location']}',
+                        dev['model'] as String,
                         style: const TextStyle(fontSize: 11, color: AppTheme.textMuted),
                       ),
                       const SizedBox(height: 4),
@@ -576,7 +567,7 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
                             model: dev['model'] as String,
                             type: dev['type'] as String,
                             serialNumber: 'SHD-BLE-${DateTime.now().millisecondsSinceEpoch % 10000}',
-                            location: dev['location'] as String,
+                            location: '',
                             isOnline: true,
                             tdsPpm: dev['tds'] as int,
                             filterLifePercentage: 92,
@@ -755,58 +746,6 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
             },
           ),
 
-          const SizedBox(height: 14),
-
-          // Location
-          const Text(
-            'Installation Location',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1E293B),
-              letterSpacing: -0.1,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: _locations.map((loc) {
-              final isSelected = _selectedLocation == loc;
-              return GestureDetector(
-                onTap: () => setState(() => _selectedLocation = loc),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 180),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: isSelected ? AppTheme.royalBlue : const Color(0xFFF8FAFC),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: isSelected ? AppTheme.royalBlue : const Color(0xFFE2E8F0),
-                    ),
-                    boxShadow: isSelected
-                        ? [
-                            BoxShadow(
-                              color: AppTheme.royalBlue.withValues(alpha: 0.25),
-                              blurRadius: 8,
-                              offset: const Offset(0, 3),
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Text(
-                    loc,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: isSelected ? Colors.white : const Color(0xFF475569),
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-
           const SizedBox(height: 22),
 
           // Submit Button
@@ -822,7 +761,7 @@ class _AddDeviceSheetState extends State<AddDeviceSheet> with SingleTickerProvid
                     model: 'Shuddham $_selectedType',
                     type: _selectedType,
                     serialNumber: _serialController.text.trim().toUpperCase(),
-                    location: _selectedLocation,
+                    location: '',
                     isOnline: true,
                     tdsPpm: _selectedType == 'Tank Sensor' ? 120 : 85,
                     filterLifePercentage: 90,

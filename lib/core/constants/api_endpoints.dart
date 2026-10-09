@@ -255,5 +255,17 @@ class ApiEndpoints {
 
   /// GET — Single water report by ID → '/water-reports/:id'
   static String waterReportById(String id) => '/water-reports/$id';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // 📡 TELEMETRY — Real-time IoT Sensor Readings from Purifiers
+  // ═══════════════════════════════════════════════════════════════════════════
+  /// GET — Get latest telemetry of all active devices
+  static const String telemetryLatest = '/telemetry/latest';
+
+  /// GET — Get latest telemetry for a specific device → '/telemetry/:devId/latest'
+  static String deviceTelemetryLatest(String devId) => '/telemetry/$devId/latest';
+
+  /// GET — Get historical telemetry logs for a device → '/telemetry/:devId'
+  static String deviceTelemetryHistory(String devId) => '/telemetry/$devId';
 }
 
