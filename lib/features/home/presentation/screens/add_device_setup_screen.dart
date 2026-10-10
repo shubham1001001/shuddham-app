@@ -358,7 +358,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
         return;
       }
       if (password.length < 8) {
-        setState(() => _errorMessage = 'Wi-Fi password must be at least 8 characters long (currently ${password.length} characters).');
+        setState(() => _errorMessage = 'Wi-Fi password must be at least 8 characters long (${password.length}/8 entered).');
         return;
       }
       if (password.length > 63) {
@@ -426,6 +426,44 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
         }
       } catch (err) {
         debugPrint('[Setup Telemetry Notice] $err');
+      }
+
+      // Pre-save device immediately to persistent disk storage so that even if the tablet
+      // sleeps, screen locks, or user closes the app before tapping 'Dashboard', it is preserved!
+      try {
+        final dev = _selectedBleDevice;
+        final shortId = dev != null ? ProvisioningService.shortId(dev.name) : 'A4F2';
+        final customName = _purifierNameController.text.trim().isNotEmpty
+            ? _purifierNameController.text.trim()
+            : (dev?.name ?? 'Shuddham Purifier');
+        final deviceId = (dev?.name != null && dev!.name.isNotEmpty)
+            ? dev.name
+            : (dev?.device.remoteId.str.isNotEmpty == true ? dev!.device.remoteId.str : 'SHD-$shortId');
+        final serialNumber = (dev?.device.remoteId.str != null && dev!.device.remoteId.str.isNotEmpty)
+            ? dev.device.remoteId.str
+            : 'SHD-RO-$shortId';
+
+        final preSaved = DeviceModel(
+          id: deviceId,
+          name: customName,
+          model: dev?.name ?? 'Shuddham Smart RO Purifier',
+          type: 'RO Purifier',
+          serialNumber: serialNumber,
+          location: _selectedRoom,
+          isOnline: true,
+          tdsPpm: _liveSetupTds ?? 54,
+          inletTdsPpm: _liveSetupInletTds ?? 58,
+          temperature: _liveSetupTemp ?? 29.1,
+          mode: _liveSetupMode ?? 'NF',
+          filterLifePercentage: 98,
+          lastSync: 'Just now',
+          totalLitersPurified: 0.0,
+          lastReadingTime: _liveSetupTimestamp ?? DateTime.now(),
+        );
+        await DeviceStorageService.saveOrUpdateDevice(preSaved);
+        debugPrint('[Setup] Purifier pre-saved successfully to local storage: ${preSaved.name} (${preSaved.serialNumber})');
+      } catch (err) {
+        debugPrint('[Setup PreSave Notice] $err');
       }
 
       await Future.delayed(const Duration(seconds: 1));
@@ -1142,7 +1180,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                                             const Icon(Icons.info_outline_rounded, size: 14, color: Color(0xFFE11D48)),
                                             const SizedBox(width: 4),
                                             Text(
-                                              'Minimum 8 characters required (/8)',
+                                              'Minimum 8 characters required (${_wifiPasswordController.text.length}/8)',
                                               style: const TextStyle(fontSize: 11.5, color: Color(0xFFE11D48), fontWeight: FontWeight.w500),
                                             ),
                                           ],
@@ -1153,7 +1191,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                                             const Icon(Icons.check_circle_outline_rounded, size: 14, color: DesignColors.success),
                                             const SizedBox(width: 4),
                                             Text(
-                                              'Password length valid ( characters)',
+                                              'Password length valid (${_wifiPasswordController.text.length} characters)',
                                               style: const TextStyle(fontSize: 11.5, color: DesignColors.success, fontWeight: FontWeight.w500),
                                             ),
                                           ],

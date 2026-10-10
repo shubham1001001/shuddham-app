@@ -5,6 +5,7 @@ import '../../../../core/services/telemetry_service.dart';
 import '../../../../core/services/provisioning_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/logout_dialog.dart';
+import '../../../../core/session/user_session.dart';
 import '../../data/models/device_model.dart';
 import '../widgets/water_drop_illustration.dart';
 import '../widgets/device_card.dart';
@@ -21,16 +22,18 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Paired devices list loaded from persistent storage
   final List<DeviceModel> _devices = [];
   int _selectedDeviceIndex = 0;
   Timer? _telemetryTimer;
   bool _isSyncing = false;
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadSavedDevices();
     // Periodically fetch live sensor telemetry from purifier every 8 seconds
     _telemetryTimer = Timer.periodic(const Duration(seconds: 8), (_) {
@@ -40,12 +43,33 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _telemetryTimer?.cancel();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      debugPrint('[HomeScreen] Tablet resumed / screen turned on. Refreshing saved & cloud devices...');
+      _loadSavedDevices();
+    }
+  }
+
   Future<void> _loadSavedDevices() async {
-    final list = await DeviceStorageService.getSavedDevices();
+    // 1. Ensure user session is alive in memory (e.g. after sleep/resume)
+    if (!UserSession().isLoggedIn) {
+      await UserSession().loadSession();
+    }
+
+    final userPhone = UserSession().rawPhone;
+    final userEmail = UserSession().email;
+    final userId = UserSession().currentUser?.id;
+    final userKey = (userId != null && userId.isNotEmpty)
+        ? userId
+        : (userPhone.isNotEmpty ? userPhone : userEmail);
+
+    final list = await DeviceStorageService.getSavedDevices(userKey: userKey);
     if (mounted) {
       setState(() {
         _devices.clear();
@@ -53,8 +77,43 @@ class _HomeScreenState extends State<HomeScreen> {
         if (_selectedDeviceIndex >= _devices.length) {
           _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
         }
+        _isLoading = false;
       });
     }
+
+    // Automatically check for purifiers assigned to this specific customer in the cloud
+    try {
+      if (userPhone.isNotEmpty || userEmail.isNotEmpty || (userId != null && userId.isNotEmpty)) {
+        final cloudDevices = await TelemetryService.instance.fetchCustomerDevices(
+          userPhone: userPhone,
+          email: userEmail,
+          customerId: userId,
+          token: UserSession().token,
+        );
+
+        // The cloud backend is the single source of truth for customer assigned hardware.
+        // We replace the local cache with the official assigned devices for THIS customer.
+        // If 0 devices are assigned to this customer, they see 0 devices (no cross-user leak).
+        await DeviceStorageService.saveDevices(cloudDevices, userKey: userKey);
+        if (mounted) {
+          setState(() {
+            _devices.clear();
+            _devices.addAll(cloudDevices);
+            if (_selectedDeviceIndex >= _devices.length) {
+              _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
+            }
+            _isLoading = false;
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('[HomeScreen] Cloud assigned devices check error: $e');
+    }
+
+    if (mounted && _isLoading) {
+      setState(() => _isLoading = false);
+    }
+
     // Immediately pull real sensor telemetry for loaded devices
     if (_devices.isNotEmpty) {
       await _syncTelemetry();
@@ -452,6 +511,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading && _devices.isEmpty) {
+      return const Scaffold(
+        backgroundColor: Color(0xFFF8FAFC),
+        body: Center(
+          child: CircularProgressIndicator(color: AppTheme.royalBlue),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       body: SafeArea(

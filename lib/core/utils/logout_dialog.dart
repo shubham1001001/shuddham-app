@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 import '../session/user_session.dart';
+import '../services/device_storage_service.dart';
 import '../../features/auth/presentation/screens/auth_screen.dart';
 import '../../features/auth/domain/usecases/logout_usecase.dart';
 import '../../features/auth/data/repositories/auth_repository_impl.dart';
@@ -71,7 +72,8 @@ Future<void> showLogoutDialog(BuildContext context, {LogoutUseCase? logoutUseCas
               Navigator.of(dialogContext).pop();
               final currentToken = UserSession().token;
 
-              // Clear local session and navigate to login screen
+              // Clear local devices and user session to completely prevent cross-account leakage
+              await DeviceStorageService.clearAllDevices();
               await UserSession().clear();
               if (!context.mounted) return;
               Navigator.of(context).pushAndRemoveUntil(

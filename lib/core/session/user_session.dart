@@ -50,16 +50,12 @@ class UserSession extends ChangeNotifier {
           notifyListeners();
         }
       } else {
-        // Auto-initialize default user session for instant seamless access
-        const defaultUser = UserEntity(
-          id: 'usr-admin-1',
-          fullName: 'Tulsi Inurum',
-          phone: '9876543210',
-          email: 'admin@gmail.com',
-          city: 'Indore',
-          token: 'shuddham-dev-session-token',
-        );
-        await setUser(defaultUser, loginInput: '9876543210');
+        _currentUser = null;
+        _phoneNumber = '';
+        _userName = '';
+        _email = '';
+        _token = '';
+        notifyListeners();
       }
     } catch (e) {
       debugPrint('[UserSession] Error loading session: $e');

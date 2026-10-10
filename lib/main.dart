@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'core/theme/app_theme.dart';
+import 'core/utils/app_logger.dart';
 import 'features/splash/presentation/screens/splash_screen.dart';
 import 'features/home/presentation/screens/home_screen.dart';
 import 'features/services/presentation/screens/services_screen.dart';
@@ -10,6 +12,12 @@ import 'core/session/user_session.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await UserSession().loadSession();
+
+  // Monitor phone Bluetooth adapter state globally
+  FlutterBluePlus.adapterState.listen((state) {
+    AppLogger.bleAdapterState(state);
+  });
+
   runApp(const ShuddhamApp());
 }
 

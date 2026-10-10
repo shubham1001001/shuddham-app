@@ -2,35 +2,43 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../features/home/data/models/device_model.dart';
+import '../session/user_session.dart';
 
 /// Local storage service to persist real paired Shuddham purifiers and their data.
+/// Scoped per authenticated customer to guarantee zero cross-account device leakage.
 class DeviceStorageService {
-  static const String _devicesKey = 'shuddham_paired_devices_v1';
+  static const String _legacyKey = 'shuddham_paired_devices_v1';
 
-  /// Loads all saved devices from device storage.
-  static Future<List<DeviceModel>> getSavedDevices() async {
+  /// Resolves the storage key scoped strictly to the currently authenticated user.
+  static String _resolveKey([String? userKey]) {
+    if (userKey != null && userKey.trim().isNotEmpty) {
+      final clean = userKey.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_');
+      return 'shuddham_paired_devices_usr_$clean';
+    }
+    final session = UserSession();
+    final uid = session.currentUser?.id;
+    if (uid != null && uid.isNotEmpty) {
+      return 'shuddham_paired_devices_usr_${uid.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')}';
+    }
+    final phone = session.rawPhone;
+    if (phone.isNotEmpty) {
+      return 'shuddham_paired_devices_usr_${phone.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')}';
+    }
+    final email = session.email;
+    if (email.isNotEmpty) {
+      return 'shuddham_paired_devices_usr_${email.replaceAll(RegExp(r'[^a-zA-Z0-9_]'), '_')}';
+    }
+    return _legacyKey;
+  }
+
+  /// Loads all saved devices from device storage for the current (or specified) user.
+  static Future<List<DeviceModel>> getSavedDevices({String? userKey}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final jsonList = prefs.getStringList(_devicesKey);
+      final key = _resolveKey(userKey);
+      final jsonList = prefs.getStringList(key);
       if (jsonList == null || jsonList.isEmpty) {
-        final defaultDev = DeviceModel(
-          id: '2805a520c400',
-          name: 'Shuddham RO Purifier',
-          model: 'Shuddham Smart RO',
-          type: 'RO Purifier',
-          serialNumber: '2805a520c400',
-          location: '',
-          isOnline: true,
-          tdsPpm: 53,
-          inletTdsPpm: 58,
-          temperature: 30.2,
-          mode: 'NF',
-          tdsRange: 90,
-          fan: 'enable',
-          lastReadingTime: DateTime.now(),
-        );
-        await saveDevices([defaultDev]);
-        return [defaultDev];
+        return [];
       }
 
       final list = jsonList
@@ -46,27 +54,6 @@ class DeviceStorageService {
           .whereType<DeviceModel>()
           .toList();
 
-      if (list.isEmpty) {
-        final defaultDev = DeviceModel(
-          id: '2805a520c400',
-          name: 'Shuddham RO Purifier',
-          model: 'Shuddham Smart RO',
-          type: 'RO Purifier',
-          serialNumber: '2805a520c400',
-          location: '',
-          isOnline: true,
-          tdsPpm: 53,
-          inletTdsPpm: 58,
-          temperature: 30.2,
-          mode: 'NF',
-          tdsRange: 90,
-          fan: 'enable',
-          lastReadingTime: DateTime.now(),
-        );
-        await saveDevices([defaultDev]);
-        return [defaultDev];
-      }
-
       return list;
     } catch (e) {
       debugPrint('[Storage] Error loading saved devices: $e');
@@ -74,35 +61,53 @@ class DeviceStorageService {
     }
   }
 
-  /// Saves the complete list of devices to persistent storage.
-  static Future<void> saveDevices(List<DeviceModel> devices) async {
+  /// Clears all saved devices completely from local storage.
+  static Future<void> clearAllDevices({String? userKey}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
+      final key = _resolveKey(userKey);
+      await prefs.remove(key);
+      await prefs.remove(_legacyKey);
+      debugPrint('[Storage] Successfully cleared all devices from storage ($key).');
+    } catch (e) {
+      debugPrint('[Storage] Error clearing all devices: $e');
+    }
+  }
+
+  /// Saves the complete list of devices to persistent storage for this user.
+  static Future<void> saveDevices(List<DeviceModel> devices, {String? userKey}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = _resolveKey(userKey);
       final jsonList = devices.map((d) => jsonEncode(d.toJson())).toList();
-      await prefs.setStringList(_devicesKey, jsonList);
-      debugPrint('[Storage] Successfully saved ${devices.length} devices to storage.');
+      await prefs.setStringList(key, jsonList);
+      // Clean legacy global key to ensure no cross-account leaks
+      if (key != _legacyKey) {
+        await prefs.remove(_legacyKey);
+      }
+      debugPrint('[Storage] Successfully saved ${devices.length} devices to storage ($key).');
     } catch (e) {
       debugPrint('[Storage] Error saving devices: $e');
     }
   }
 
-  /// Adds or updates a paired device.
-  static Future<void> saveOrUpdateDevice(DeviceModel device) async {
-    final list = await getSavedDevices();
+  /// Adds or updates a paired device for this user.
+  static Future<void> saveOrUpdateDevice(DeviceModel device, {String? userKey}) async {
+    final list = await getSavedDevices(userKey: userKey);
     final index = list.indexWhere((d) => d.id == device.id || d.serialNumber == device.serialNumber);
     if (index >= 0) {
       list[index] = device;
     } else {
       list.add(device);
     }
-    await saveDevices(list);
+    await saveDevices(list, userKey: userKey);
   }
 
-  /// Removes a device by its ID.
-  static Future<void> removeDevice(String deviceId) async {
-    final list = await getSavedDevices();
+  /// Removes a device by its ID for this user.
+  static Future<void> removeDevice(String deviceId, {String? userKey}) async {
+    final list = await getSavedDevices(userKey: userKey);
     list.removeWhere((d) => d.id == deviceId);
-    await saveDevices(list);
+    await saveDevices(list, userKey: userKey);
   }
 
   /// Updates live sensor telemetry (TDS, temp, inlet TDS, mode, etc.) for a device.
@@ -118,8 +123,9 @@ class DeviceStorageService {
     int? filterLife,
     double? totalLiters,
     DateTime? lastReadingTime,
+    String? userKey,
   }) async {
-    final list = await getSavedDevices();
+    final list = await getSavedDevices(userKey: userKey);
     final index = list.indexWhere((d) =>
         d.id == deviceId ||
         d.serialNumber == deviceId ||
@@ -139,7 +145,7 @@ class DeviceStorageService {
         isOnline: isOnline ?? true,
         lastReadingTime: lastReadingTime ?? DateTime.now(),
       );
-      await saveDevices(list);
+      await saveDevices(list, userKey: userKey);
     }
   }
 }

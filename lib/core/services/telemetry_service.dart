@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../constants/api_endpoints.dart';
 import '../services/device_storage_service.dart';
+import '../utils/app_logger.dart';
+import '../session/user_session.dart';
 import '../../features/home/data/models/device_model.dart';
 
 /// Service responsible for fetching live sensor readings (TDS, temperature, mode)
@@ -30,14 +32,75 @@ class TelemetryService {
           final list = (body['data'] as List)
               .whereType<Map<String, dynamic>>()
               .toList();
-          debugPrint('[Telemetry] Fetched ${list.length} live device sensor records.');
           return list;
         }
-      } else {
-        debugPrint('[Telemetry] HTTP status ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('[Telemetry] Failed to fetch live telemetry: $e');
+    } finally {
+      client?.close(force: true);
+    }
+    return [];
+  }
+
+  /// Fetches purifiers officially assigned & installed for this customer from the cloud.
+  /// Matches strictly against customer phone, email, customerId, or authenticated Bearer token.
+  Future<List<DeviceModel>> fetchCustomerDevices({
+    String? userPhone,
+    String? email,
+    String? customerId,
+    String? token,
+  }) async {
+    final phone = (userPhone ?? '').replaceAll(RegExp(r'\D'), '');
+    final mail = (email ?? '').trim();
+    final cid = (customerId ?? '').trim();
+    final jwt = (token != null && token.isNotEmpty) ? token : UserSession().token;
+
+    if (phone.isEmpty && mail.isEmpty && cid.isEmpty && jwt.isEmpty) {
+      return [];
+    }
+
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+
+      final queryParams = <String, String>{};
+      if (phone.isNotEmpty) queryParams['phone'] = phone;
+      if (mail.isNotEmpty) queryParams['email'] = mail;
+      if (cid.isNotEmpty) queryParams['customerId'] = cid;
+
+      final uri = Uri.parse('${ApiEndpoints.liveBaseUrl}/customer/devices').replace(
+        queryParameters: queryParams.isNotEmpty ? queryParams : null,
+      );
+
+      final request = await client.getUrl(uri);
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (jwt.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $jwt');
+      }
+      final response = await request.close().timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final rawBody = await response.transform(utf8.decoder).join();
+        final body = jsonDecode(rawBody);
+        if (body is Map && body['success'] == true && body['data'] is List) {
+          final list = (body['data'] as List)
+              .whereType<Map<String, dynamic>>()
+              .map((d) {
+                try {
+                  return DeviceModel.fromJson(d);
+                } catch (e) {
+                  debugPrint('[Telemetry] Failed to parse customer device: $e');
+                  return null;
+                }
+              })
+              .whereType<DeviceModel>()
+              .toList();
+          return list;
+        }
+      }
+    } catch (e) {
+      debugPrint('[Telemetry] Failed to fetch customer assigned devices: $e');
     } finally {
       client?.close(force: true);
     }
@@ -61,6 +124,16 @@ class TelemetryService {
         final updated = applyTelemetryToDevice(dev, match);
         updatedList.add(updated);
         hasChanges = true;
+
+        AppLogger.telemetryReceived(
+          deviceId: updated.id,
+          tds1: updated.inletTdsPpm,
+          tds2: updated.tdsPpm,
+          temp: updated.temperature,
+          mode: updated.mode,
+          fan: updated.fan,
+          isOnline: updated.isOnline,
+        );
       } else {
         updatedList.add(dev);
       }
@@ -68,7 +141,6 @@ class TelemetryService {
 
     if (hasChanges) {
       await DeviceStorageService.saveDevices(updatedList);
-      debugPrint('[Telemetry] Synced and saved ${updatedList.length} devices with real sensor data.');
     }
 
     return updatedList;
@@ -224,9 +296,6 @@ class TelemetryService {
   }) async {
     HttpClient? client;
     try {
-      final isEnable = command == 'F,1';
-      final fanState = isEnable ? 'enable' : 'disable';
-
       // 1. Resolve true Wi-Fi hardware MAC (STA MAC 2805a520c400)
       final cleanDevId = _cleanMac(deviceId);
       final cleanSerial = serialNumber != null ? _cleanMac(serialNumber) : '';
@@ -249,7 +318,7 @@ class TelemetryService {
       final targetTopic = 'Shudhham/$targetHwId/v1/command';
 
       // Send single direct command string ("F,1" or "F,0")
-      await _publishSingleMqtt(client!, publishUrl, targetTopic, command);
+      await _publishSingleMqtt(client, publishUrl, targetTopic, command);
       return true;
     } catch (e) {
       debugPrint('[Telemetry] Failed to send MQTT command: $e');
@@ -261,15 +330,24 @@ class TelemetryService {
 
   Future<void> _publishSingleMqtt(HttpClient client, String publishUrl, String topic, String message) async {
     try {
+      final payload = {
+        'topic': topic,
+        'message': message,
+      };
+      final devId = topic.replaceAll('Shudhham/', '').replaceAll('/v1/command', '');
+      AppLogger.mqttCommandSent(
+        command: message,
+        deviceId: devId,
+        topic: topic,
+        payload: payload,
+      );
+
       final req = await client.postUrl(Uri.parse(publishUrl));
       req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      req.add(utf8.encode(jsonEncode({
-        'topic': topic,
-        'message': message,
-      })));
+      req.add(utf8.encode(jsonEncode(payload)));
       final resp = await req.close().timeout(const Duration(seconds: 3));
-      debugPrint('📡 [MQTT SUCCESS] $topic => "$message" (status: ${resp.statusCode})');
+      debugPrint('✅ [MQTT DELIVERED] $topic => "$message" (HTTP ${resp.statusCode})');
     } catch (e) {
       debugPrint('❌ [MQTT FAILED] $topic => "$message" ($e)');
     }
@@ -310,15 +388,15 @@ class TelemetryService {
       request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
 
-      final payload = {
+      final payload = <String, dynamic>{
         'dev_Id': targetDevId,
         'fan': fanState,
-        if (tds1 != null) 'tds1': tds1,
-        if (tds2 != null) 'tds2': tds2,
-        if (temp != null) 'temp': temp,
-        if (mode != null) 'mode': mode,
-        if (tdsRange != null) 'tds_range': tdsRange,
       };
+      if (tds1 != null) payload['tds1'] = tds1;
+      if (tds2 != null) payload['tds2'] = tds2;
+      if (temp != null) payload['temp'] = temp;
+      if (mode != null) payload['mode'] = mode;
+      if (tdsRange != null) payload['tds_range'] = tdsRange;
 
       request.add(utf8.encode(jsonEncode(payload)));
       final response = await request.close().timeout(const Duration(seconds: 5));

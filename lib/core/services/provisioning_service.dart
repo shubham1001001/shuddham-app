@@ -7,6 +7,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../constants/ble_constants.dart';
+import '../utils/app_logger.dart';
 
 /// Scanned Wi-Fi network reported by the ESP32 TDS Monitor over BLE.
 class BleWifiNetwork {
@@ -74,9 +75,17 @@ enum ProvisioningFailureReason {
 class ProvisioningService {
   static final ProvisioningService instance = ProvisioningService();
 
+  ProvisioningService() {
+    // Monitor and log live Bluetooth adapter state changes
+    FlutterBluePlus.adapterState.listen((state) {
+      AppLogger.bleAdapterState(state);
+    });
+  }
+
   BluetoothDevice? _connectedDevice;
   BluetoothCharacteristic? _commChar;
   StreamSubscription<List<int>>? _notifySub;
+  StreamSubscription<BluetoothConnectionState>? _connSub;
   final StreamController<String> _notifications = StreamController<String>.broadcast();
 
   BluetoothDevice? get connectedDevice => _connectedDevice;
@@ -135,6 +144,7 @@ class ProvisioningService {
   Future<List<DiscoveredBleDevice>> scanDevices({Duration timeout = const Duration(seconds: 8)}) async {
     // Ensure Bluetooth is available and powered on
     final state = await FlutterBluePlus.adapterState.first;
+    AppLogger.bleAdapterState(state);
     if (state != BluetoothAdapterState.on) {
       if (Platform.isAndroid) {
         try {
@@ -143,6 +153,7 @@ class ProvisioningService {
       }
     }
 
+    AppLogger.bleScanStarted();
     final discoveredMap = <String, DiscoveredBleDevice>{};
 
     final scanSub = FlutterBluePlus.scanResults.listen((results) {
@@ -150,8 +161,6 @@ class ProvisioningService {
         final advName = r.advertisementData.advName.trim().replaceAll('\x00', '');
         final devName = r.device.platformName.trim().replaceAll('\x00', '');
         final name = advName.isNotEmpty ? advName : devName;
-
-        debugPrint('[BLE Found] Name: "$name", AdvName: "$advName", DevName: "$devName", ID: "${r.device.remoteId}", UUIDs: ${r.advertisementData.serviceUuids.map((u) => u.str).toList()}, RSSI: ${r.rssi}');
 
         final id = r.device.remoteId.str;
         final existing = discoveredMap[id];
@@ -174,6 +183,14 @@ class ProvisioningService {
         final isPurifierDevice = hasMatchingName || hasMatchingService;
 
         if (isPurifierDevice) {
+          AppLogger.bleDeviceDiscovered(
+            name: name,
+            remoteId: id,
+            rssi: r.rssi,
+            isPurifier: true,
+            serviceUuids: r.advertisementData.serviceUuids.map((u) => u.str).toList(),
+          );
+
           // Retain real discovered name if subsequent packets have empty name
           String displayName = name;
           if (displayName.isEmpty && existing != null && existing.name.isNotEmpty) {
@@ -214,6 +231,12 @@ class ProvisioningService {
       if (!a.isPurifier && b.isPurifier) return 1;
       return b.rssi.compareTo(a.rssi);
     });
+
+    AppLogger.bleScanCompleted(
+      discoveredMap.length,
+      list.where((d) => d.isPurifier).length,
+    );
+
     return list;
   }
 
@@ -222,11 +245,14 @@ class ProvisioningService {
   Future<void> connect(BluetoothDevice device) async {
     await disconnect();
 
+    final deviceName = device.platformName.isNotEmpty ? device.platformName : 'Shuddham Device';
+    final deviceId = device.remoteId.str;
+
     // Try connecting with up to 3 attempts with settling delays
     Object? connectError;
     for (int attempt = 1; attempt <= 3; attempt++) {
       try {
-        debugPrint('[BLE] 1. Connecting to ${device.remoteId} (attempt $attempt)...');
+        AppLogger.bleConnecting(deviceName, deviceId, attempt);
         await device.connect(autoConnect: false, mtu: null).timeout(const Duration(seconds: 8));
         _connectedDevice = device;
         connectError = null;
@@ -246,10 +272,17 @@ class ProvisioningService {
       throw connectError;
     }
 
+    // Monitor live connection state changes
+    _connSub = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        AppLogger.bleDisconnected(name: deviceName, remoteId: deviceId, reason: 'Bluetooth connection dropped / closed by hardware');
+      }
+    });
+
     // Settle connection completely before discovering services
     await Future.delayed(const Duration(milliseconds: 1000));
 
-    debugPrint('[BLE] 2. Discovering services...');
+    debugPrint('[BLE] Discovering services...');
     final services = await device.discoverServices();
     await Future.delayed(const Duration(milliseconds: 1200));
 
@@ -258,11 +291,8 @@ class ProvisioningService {
 
     for (final s in services) {
       final sUuid = s.uuid.str.toLowerCase();
-      debugPrint('[BLE Discovery] Found Service: $sUuid');
       for (final c in s.characteristics) {
         final cUuid = c.uuid.str.toLowerCase();
-        final descUuids = c.descriptors.map((d) => d.uuid.str.toLowerCase()).toList();
-        debugPrint('[BLE Discovery]   -> Char: $cUuid (write: ${c.properties.write}, writeWithoutResp: ${c.properties.writeWithoutResponse}, notify: ${c.properties.notify}) Descriptors: $descUuids');
         if (sUuid.contains('00ff') || sUuid == BleConstants.bleGattServiceUuid.toLowerCase()) {
           if (cUuid.contains('ff01') || cUuid == BleConstants.bleCharUuid.toLowerCase()) {
             writeChar = c;
@@ -309,34 +339,30 @@ class ProvisioningService {
     if (activeNotifyChar != null) {
       _notifySub = activeNotifyChar.onValueReceived.listen((bytes) {
         final text = utf8.decode(bytes, allowMalformed: true).trim();
-        debugPrint('[BLE Notify] <<< $text');
+        AppLogger.bleResponseReceived(text);
         if (text.isNotEmpty) {
           _notifications.add(text);
         }
       });
 
       if (activeNotifyChar.properties.notify || activeNotifyChar.properties.indicate) {
-        debugPrint('[BLE] 3. Enabling notifications on characteristic: ${activeNotifyChar.uuid.str}...');
         try {
           await Future.delayed(const Duration(milliseconds: 1000));
           await activeNotifyChar.setNotifyValue(true, timeout: 15);
-          debugPrint('[BLE] Notifications listener registered.');
           await Future.delayed(const Duration(milliseconds: 1000));
         } catch (e) {
           debugPrint('[BLE] setNotifyValue notice (settling GATT queue): $e');
-          // If setNotifyValue timed out or had an error, wait for Android GATT queue to clear
           await Future.delayed(const Duration(milliseconds: 2500));
         }
       }
     }
 
     await Future.delayed(const Duration(milliseconds: 800));
-    debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 🔵 [BLUETOOTH CONNECTED] Purifier: ${_connectedDevice?.remoteId.str}
-║ 📡 BLE Service: 0x00FF | Characteristic: 0xFF01
-║ ✅ Status: Ready to receive commands (WSCAN / Provisioning)
-╚══════════════════════════════════════════════════════════════╝''');
+    AppLogger.bleConnected(
+      name: deviceName,
+      remoteId: deviceId,
+      services: services.map((s) => s.uuid.str).toList(),
+    );
   }
 
   /// Writes ASCII command to BLE Characteristic with robust queue-busy retry logic.
@@ -347,10 +373,7 @@ class ProvisioningService {
     final bool useWithoutResponse = !canWrite && canWriteWithoutResp;
     final int timeout = timeoutSeconds ?? BleConstants.writeTimeout.inSeconds;
 
-    debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 📤 [BLE COMMAND TRANSMITTED] >>> "$command" (withoutResponse: $useWithoutResponse, timeout: ${timeout}s)
-╚══════════════════════════════════════════════════════════════╝''');
+    AppLogger.bleCommandSent(command, targetDev: _connectedDevice?.remoteId.str);
     final bytes = utf8.encode(command);
 
     Object? lastError;
@@ -364,7 +387,6 @@ class ProvisioningService {
           withoutResponse: useWithoutResponse,
           timeout: timeout,
         );
-        debugPrint('✅ [BLE COMMAND ACKNOWLEDGED] >>> "$command"');
         return;
       } catch (e) {
         lastError = e;
@@ -446,10 +468,6 @@ class ProvisioningService {
   }
 
   /// Scans for Wi-Fi networks visible to the purifier by sending "WSCAN".
-  /// Handles both formats:
-  ///   "Found WiFi: 5"
-  ///   "[1]:Airtel_MESB[1]"
-  ///   "[4]:DYNAMIQUE ELECTR"
   Future<List<BleWifiNetwork>> scanWifiNetworks({Duration timeout = BleConstants.wifiScanTimeout}) async {
     if (_commChar == null) throw Exception('Device not connected over BLE');
 
@@ -486,13 +504,11 @@ class ProvisioningService {
         seenSsids.add(text.toLowerCase());
         final realIdx = currentIndex > 0 ? currentIndex : networks.length + 1;
         networks.add(BleWifiNetwork(index: realIdx, ssid: text, security: sec));
-        debugPrint('📶 [PURIFIER WI-FI READY] #$realIdx: "$text" (${sec == 0 ? "Open" : "Secured"})');
       }
       currentRawBuffer = '';
     }
 
     final sub = _notifications.stream.listen((msg) {
-      debugPrint('[BLE Scan Msg] $msg');
       final trimmed = msg.trim();
       if (trimmed.isEmpty) return;
 
@@ -500,7 +516,6 @@ class ProvisioningService {
         finalizeCurrentEntry();
         final countStr = trimmed.replaceFirst('Found WiFi:', '').trim();
         expectedCount = int.tryParse(countStr) ?? -1;
-        debugPrint('📊 [PURIFIER WI-FI SCAN] Hardware reported total networks: $expectedCount');
         if (expectedCount == 0 && !completer.isCompleted) {
           settleTimer?.cancel();
           completer.complete([]);
@@ -508,19 +523,16 @@ class ProvisioningService {
         return;
       }
 
-      // Check if this line starts a NEW numbered network entry e.g. "[1]:", "[12]:"
       if (trimmed.startsWith('[') && trimmed.contains(']:')) {
         finalizeCurrentEntry();
         final closeIdx = trimmed.indexOf(']:');
         currentIndex = int.tryParse(trimmed.substring(1, closeIdx)) ?? (networks.length + 1);
         currentRawBuffer = trimmed.substring(closeIdx + 2).trim();
 
-        // If the entry was short and completed in this single packet (e.g. "tulsi[2]")
         if (RegExp(r'\[\d+\]\s*$').hasMatch(currentRawBuffer)) {
           finalizeCurrentEntry();
         }
       } else if (currentRawBuffer.isNotEmpty) {
-        // Continuation chunk of the current network (e.g. "IES_4G[1]" or "]" or "[1]")
         currentRawBuffer += trimmed;
         if (RegExp(r'\[\d+\]\s*$').hasMatch(currentRawBuffer) || currentRawBuffer.endsWith(']')) {
           finalizeCurrentEntry();
@@ -551,10 +563,7 @@ class ProvisioningService {
     });
 
     try {
-      debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 🔍 [HARDWARE WI-FI SCAN STARTED] Sending "WSCAN" to Purifier...
-╚══════════════════════════════════════════════════════════════╝''');
+      AppLogger.wifiScanStarted();
       try {
         await _writeAscii('WSCAN', timeoutSeconds: 25);
       } catch (writeErr) {
@@ -569,13 +578,7 @@ class ProvisioningService {
         },
       );
 
-      final listSummary = result.map((n) => '║   • [${n.index}] ${n.ssid} (${n.isOpen ? "Open" : "Secured"})').join('\n');
-      debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 📋 [PURIFIER WI-FI SCAN COMPLETE]
-║ 🔢 Total Networks Visible to Hardware: ${result.length}
-$listSummary
-╚══════════════════════════════════════════════════════════════╝''');
+      AppLogger.wifiScanCompleted(result);
       return result;
     } finally {
       settleTimer?.cancel();
@@ -595,12 +598,11 @@ $listSummary
       throw ArgumentError('SSID must not be empty.');
     }
 
-    debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 🚀 [WI-FI PROVISIONING STARTED]
-║ 📶 Target SSID: "$cleanSsid"
-║ 🔑 Password: ${cleanPass.isEmpty ? "(None / Open)" : "********"}
-╚══════════════════════════════════════════════════════════════╝''');
+    final deviceName = _connectedDevice?.platformName.isNotEmpty == true
+        ? _connectedDevice!.platformName
+        : 'Shuddham Purifier';
+
+    AppLogger.wifiProvisioningStarted(ssid: cleanSsid, deviceName: deviceName);
 
     final completer = Completer<bool>();
 
@@ -611,23 +613,13 @@ $listSummary
     bool credentialsDelivered = false;
 
     final sub = _notifications.stream.listen((msg) {
-      debugPrint('[BLE Provision Msg] $msg');
       final lower = msg.toLowerCase();
       if ((lower.contains('conected') || lower.contains('connected') || lower.contains('wifi ok') || lower.contains('ip:')) &&
           !lower.contains('not')) {
-        debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 🎉 [PURIFIER WI-FI CONNECTED SUCCESSFULLY]
-║ 📶 Network: "$cleanSsid"
-║ ✅ ESP32 Purifier has connected to Wi-Fi!
-╚══════════════════════════════════════════════════════════════╝''');
+        AppLogger.wifiProvisioningResult(success: true, ssid: cleanSsid);
         if (!completer.isCompleted) completer.complete(true);
       } else if (lower.contains('not conected') || lower.contains('not connected') || lower.contains('fail') || lower.contains('error')) {
-        debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ ❌ [PURIFIER WI-FI CONNECTION FAILED]
-║ ⚠️ ESP32 returned: Not Connected / Failed
-╚══════════════════════════════════════════════════════════════╝''');
+        AppLogger.wifiProvisioningResult(success: false, ssid: cleanSsid, message: 'ESP32 response: $msg');
         if (!completer.isCompleted) completer.complete(false);
       }
     });
@@ -637,18 +629,22 @@ $listSummary
       connSub = _connectedDevice!.connectionState.listen((state) {
         if (state == BluetoothConnectionState.disconnected) {
           if (credentialsDelivered) {
-            debugPrint('''
-╔══════════════════════════════════════════════════════════════╗
-║ 📡 [BLE DISCONNECTED - EXPECTED ON WI-FI JOIN]
-║ Firmware turned off BLE to enter Wi-Fi MQTT mode.
-╚══════════════════════════════════════════════════════════════╝''');
+            AppLogger.bleDisconnected(
+              name: deviceName,
+              remoteId: _connectedDevice?.remoteId.str ?? '',
+              reason: 'Device joined Wi-Fi and switched off BLE (Expected)',
+            );
             Future.delayed(const Duration(milliseconds: 1000), () {
               if (!completer.isCompleted) {
                 completer.complete(true);
               }
             });
           } else {
-            debugPrint('⚠️ [BLE] Disconnected BEFORE credentials were fully transmitted.');
+            AppLogger.bleDisconnected(
+              name: deviceName,
+              remoteId: _connectedDevice?.remoteId.str ?? '',
+              reason: 'Disconnected BEFORE credentials were fully transmitted',
+            );
             if (!completer.isCompleted) {
               completer.complete(false);
             }
@@ -673,7 +669,7 @@ $listSummary
       return await completer.future.timeout(
         timeout,
         onTimeout: () {
-          debugPrint('⚠️ [BLE] Timeout waiting for WiFi connection result from ESP32');
+          AppLogger.wifiProvisioningResult(success: false, ssid: cleanSsid, message: 'Timeout waiting for Wi-Fi join ack from ESP32');
           return false;
         },
       );
@@ -705,6 +701,8 @@ $listSummary
     try {
       await _notifySub?.cancel();
       _notifySub = null;
+      await _connSub?.cancel();
+      _connSub = null;
       _commChar = null;
       if (_connectedDevice != null) {
         try {

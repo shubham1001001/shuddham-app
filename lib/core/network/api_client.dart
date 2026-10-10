@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import '../constants/api_endpoints.dart';
 import '../error/exceptions.dart';
-import '../utils/api_logger.dart';
+import '../utils/app_logger.dart';
 
 /// Centralized API HTTP Client handling fallback URLs,
 /// logging, request timeout, and standardized exceptions.
@@ -96,7 +96,7 @@ class ApiClient {
           ...?headers,
         };
 
-        ApiLogger.logRequest(
+        AppLogger.apiRequest(
           method: method,
           uri: uri,
           headers: requestHeaders,
@@ -136,7 +136,7 @@ class ApiClient {
         final responseBody = await response.transform(utf8.decoder).join();
         stopwatch.stop();
 
-        ApiLogger.logResponse(
+        AppLogger.apiResponse(
           method: method,
           uri: uri,
           statusCode: response.statusCode,
@@ -165,16 +165,16 @@ class ApiClient {
         client?.close(force: true);
         rethrow;
       } on SocketException catch (e) {
-        ApiLogger.logError(method: method, uri: uri, error: 'SocketException: ${e.message}');
+        AppLogger.apiError(method: method, uri: uri, error: 'SocketException: ${e.message}');
         continue;
       } on HttpException catch (e) {
-        ApiLogger.logError(method: method, uri: uri, error: 'HttpException: ${e.message}');
+        AppLogger.apiError(method: method, uri: uri, error: 'HttpException: ${e.message}');
         continue;
       } on TimeoutException {
-        ApiLogger.logError(method: method, uri: uri, error: 'TimeoutException: Request timed out');
+        AppLogger.apiError(method: method, uri: uri, error: 'TimeoutException: Request timed out');
         continue;
       } catch (e) {
-        ApiLogger.logError(method: method, uri: uri, error: e);
+        AppLogger.apiError(method: method, uri: uri, error: e);
         continue;
       } finally {
         client?.close(force: true);
