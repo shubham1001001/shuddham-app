@@ -56,7 +56,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _loadSavedDevices() async {
+  Future<void> _loadSavedDevices({bool forceLoader = false}) async {
+    if (mounted && (_devices.isEmpty || forceLoader)) {
+      setState(() => _isLoading = true);
+    }
+
     // 1. Ensure user session is alive in memory (e.g. after sleep/resume)
     if (!UserSession().isLoggedIn) {
       await UserSession().loadSession();
@@ -69,13 +73,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ? userId
         : (userPhone.isNotEmpty ? userPhone : userEmail);
 
-    final list = await DeviceStorageService.getSavedDevices(userKey: userKey);
-    if (mounted) {
+    final localList = await DeviceStorageService.getSavedDevices(userKey: userKey);
+    // If local devices already exist, display them immediately so user sees their purifier without lag
+    if (mounted && localList.isNotEmpty && !forceLoader) {
       setState(() {
         _devices.clear();
-        _devices.addAll(list);
+        _devices.addAll(localList);
         if (_selectedDeviceIndex >= _devices.length) {
-          _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
+          _selectedDeviceIndex = _devices.length - 1;
         }
         _isLoading = false;
       });
@@ -92,8 +97,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         );
 
         // The cloud backend is the single source of truth for customer assigned hardware.
-        // We replace the local cache with the official assigned devices for THIS customer.
-        // If 0 devices are assigned to this customer, they see 0 devices (no cross-user leak).
         await DeviceStorageService.saveDevices(cloudDevices, userKey: userKey);
         if (mounted) {
           setState(() {
@@ -105,13 +108,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _isLoading = false;
           });
         }
+      } else {
+        if (mounted) setState(() => _isLoading = false);
       }
     } catch (e) {
       debugPrint('[HomeScreen] Cloud assigned devices check error: $e');
-    }
-
-    if (mounted && _isLoading) {
-      setState(() => _isLoading = false);
+    } finally {
+      if (mounted && _isLoading) {
+        setState(() => _isLoading = false);
+      }
     }
 
     // Immediately pull real sensor telemetry for loaded devices
@@ -511,23 +516,85 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading && _devices.isEmpty) {
-      return const Scaffold(
-        backgroundColor: Color(0xFFF8FAFC),
-        body: Center(
-          child: CircularProgressIndicator(color: AppTheme.royalBlue),
-        ),
-      );
-    }
-
     return Scaffold(
       backgroundColor: const Color(0xFFF8FAFC),
       body: SafeArea(
-        child: _devices.isEmpty
-            ? _buildNoPurifierScreen()
-            : _buildConnectedPurifierScreen(),
+        child: _isLoading && _devices.isEmpty
+            ? _buildLoadingScreen()
+            : (_devices.isEmpty
+                ? _buildNoPurifierScreen()
+                : _buildConnectedPurifierScreen()),
       ),
     );
+  }
+
+  /// Dedicated loading screen shown while fetching purifiers from cloud
+  Widget _buildLoadingScreen() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildTopHeader(isConnected: false),
+        Expanded(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 32),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    width: 90,
+                    height: 90,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppTheme.royalBlue.withValues(alpha: 0.08),
+                    ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        SizedBox(
+                          width: 82,
+                          height: 82,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 3.5,
+                            color: AppTheme.royalBlue,
+                            backgroundColor: AppTheme.royalBlue.withValues(alpha: 0.15),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.water_drop_rounded,
+                          size: 38,
+                          color: AppTheme.royalBlue,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  const Text(
+                    'Loading Purifier...',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF102A43),
+                      letterSpacing: -0.3,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Connecting to Shuddham Cloud & checking your assigned devices...',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: Color(0xFF627D98),
+                      height: 1.4,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+    ],
+  );
   }
 
   /// 1. Screen matching the user's reference image
@@ -540,14 +607,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         // Top Header: Shuddham Brand Logo + Title + Status + Logout
         _buildTopHeader(isConnected: false),
 
-        // Centered Main Content
+        // Centered Main Content with Pull-To-Refresh
         Expanded(
-          child: Center(
-            child: SingleChildScrollView(
-              physics: const BouncingScrollPhysics(),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
+          child: RefreshIndicator(
+            onRefresh: () => _loadSavedDevices(forceLoader: true),
+            color: AppTheme.royalBlue,
+            child: Center(
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
                   // Circular water droplet illustration
                   const WaterDropIllustration(size: 155),
                   const SizedBox(height: 28),
@@ -621,8 +691,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           ),
         ),
-      ],
-    );
+      ),
+    ],
+  );
   }
 
   /// 2. Screen shown once user connects their purifier(s)
