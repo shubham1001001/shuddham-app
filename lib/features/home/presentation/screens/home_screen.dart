@@ -778,43 +778,104 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: activeDevice.isOnline ? AppTheme.accentGreen : Colors.grey,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  '${activeDevice.isOnline ? 'Live Sensor' : 'Offline'} • ${activeDevice.name}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: AppTheme.textDark,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
                         Row(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              width: 10,
-                              height: 10,
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                               decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: activeDevice.isOnline ? AppTheme.accentGreen : Colors.grey,
+                                color: activeDevice.isOnline ? const Color(0xFFF0FDF4) : const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                activeDevice.mode != null
+                                    ? '${activeDevice.mode} MODE'
+                                    : (activeDevice.isOnline ? 'LIVE' : 'OFFLINE'),
+                                style: TextStyle(
+                                  color: activeDevice.isOnline ? AppTheme.accentGreen : AppTheme.textMuted,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            Text(
-                              '${activeDevice.isOnline ? 'Live Sensor' : 'Offline'} • ${activeDevice.name}',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: AppTheme.textDark,
+                            const SizedBox(width: 4),
+                            Theme(
+                              data: Theme.of(context).copyWith(
+                                splashColor: Colors.transparent,
+                                highlightColor: Colors.transparent,
+                              ),
+                              child: PopupMenuButton<String>(
+                                color: Colors.white,
+                                icon: const Icon(
+                                  Icons.more_vert_rounded,
+                                  size: 19,
+                                  color: AppTheme.textDark,
+                                ),
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 124, maxWidth: 142),
+                                menuPadding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                                tooltip: 'Device Options',
+                                elevation: 3,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(10),
+                                  side: const BorderSide(color: Color(0xFFE2EEF8)),
+                                ),
+                                onSelected: (value) {
+                                  if (value == 'details') {
+                                    _openDeviceDetails(activeDevice, _selectedDeviceIndex);
+                                  }
+                                },
+                                itemBuilder: (context) => [
+                                  PopupMenuItem<String>(
+                                    value: 'details',
+                                    height: 34,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                                    child: Row(
+                                      children: const [
+                                        Icon(Icons.info_outline_rounded, size: 15, color: AppTheme.royalBlue),
+                                        SizedBox(width: 8),
+                                        Text(
+                                          'Device Details',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: AppTheme.textDark,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: activeDevice.isOnline ? const Color(0xFFF0FDF4) : const Color(0xFFF1F5F9),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            activeDevice.mode != null
-                                ? '${activeDevice.mode} MODE'
-                                : (activeDevice.isOnline ? 'LIVE' : 'OFFLINE'),
-                            style: TextStyle(
-                              color: activeDevice.isOnline ? AppTheme.accentGreen : AppTheme.textMuted,
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
                         ),
                       ],
                     ),

@@ -183,16 +183,6 @@ class TelemetryService {
       }
     }
 
-    // 2. If user has only one paired device, bind to the most recently updated record
-    if (records.isNotEmpty) {
-      // Pick device 2805a520c400 if present or first
-      final preferred = records.firstWhere(
-        (r) => (r['dev_id']?.toString() ?? '').contains('2805a520c4'),
-        orElse: () => records.first,
-      );
-      return preferred;
-    }
-
     return null;
   }
 
@@ -280,7 +270,7 @@ class TelemetryService {
     );
   }
 
-  String? _lastHardwareDevId = '2805a520c400';
+  String? _lastHardwareDevId;
   String? get lastHardwareDevId => _lastHardwareDevId;
 
   /// Sends an MQTT downlink command (e.g. "F,0", "F,1") to the purifier via the AWS IoT backend.
