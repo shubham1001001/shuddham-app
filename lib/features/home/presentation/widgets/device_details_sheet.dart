@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../../core/services/device_storage_service.dart';
 import '../../../../core/services/telemetry_service.dart';
+import '../../../../core/utils/app_logger.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../data/models/device_model.dart';
 import '../../domain/entities/device_entity.dart';
@@ -75,29 +76,25 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
     setState(() => _isSaving = true);
     final targetRange = _tdsValue > 990.0 ? 1000 : _tdsValue.round();
 
+    final fanState = _device.fan ?? 'enable';
+
     try {
-      // 1. Update backend & MQTT with input TDS
-      await TelemetryService.instance.updateFanStateInBackend(
+      // 1. Dispatch via Smart Hybrid Config (checks Internet -> MQTT JSON, falls back to BLE)
+      final dispatchResult = await TelemetryService.instance.sendSmartConfig(
         deviceId: _device.id,
         serialNumber: _device.serialNumber,
-        fanState: _device.fan ?? 'enable',
-        tds1: targetRange,
-        tds2: _device.tdsPpm,
-        temp: _device.temperature,
-        mode: _device.mode,
         tdsRange: targetRange,
+        fanState: fanState,
+        rawCommand: 'T,$targetRange',
       );
 
-      // 2. Also send MQTT command
-      await TelemetryService.instance.sendCommand(
+      // Print structured log for developer & QA visibility
+      AppLogger.tdsCommandSent(
         deviceId: _device.id,
-        serialNumber: _device.serialNumber,
+        rawTds: _tdsValue,
+        finalTds: targetRange,
         command: 'T,$targetRange',
-        tds1: targetRange,
-        tds2: _device.tdsPpm,
-        temp: _device.temperature,
-        mode: _device.mode,
-        tdsRange: targetRange,
+        topic: 'Shudhham/tds/v1/SubConfig',
       );
 
       // 3. Update local storage device model
@@ -136,15 +133,23 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
           SnackBar(
             content: Row(
               children: [
-                const Icon(Icons.check_circle_rounded, color: Colors.white, size: 20),
+                Icon(
+                  dispatchResult.success ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
+                  color: Colors.white,
+                  size: 20,
+                ),
                 const SizedBox(width: 10),
-                Text(
-                  'Input TDS Value set to $targetRange PPM successfully!',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
+                Expanded(
+                  child: Text(
+                    'TDS set to $targetRange PPM (${dispatchResult.message})',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
                 ),
               ],
             ),
-            backgroundColor: AppTheme.accentGreen,
+            backgroundColor: dispatchResult.transport == 'mqtt'
+                ? AppTheme.accentGreen
+                : (dispatchResult.success ? Colors.blue.shade700 : Colors.red.shade700),
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             margin: const EdgeInsets.all(16),

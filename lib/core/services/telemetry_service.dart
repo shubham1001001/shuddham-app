@@ -8,6 +8,21 @@ import '../utils/app_logger.dart';
 import '../session/user_session.dart';
 import '../../features/home/data/models/device_model.dart';
 
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'provisioning_service.dart';
+
+class CommandDispatchResult {
+  final bool success;
+  final String transport; // 'mqtt' or 'ble'
+  final String message;
+
+  CommandDispatchResult({
+    required this.success,
+    required this.transport,
+    required this.message,
+  });
+}
+
 /// Service responsible for fetching live sensor readings (TDS, temperature, mode)
 /// from the AWS IoT telemetry backend (http://3.88.13.76:4000/api/telemetry).
 class TelemetryService {
@@ -118,6 +133,7 @@ class TelemetryService {
     final List<DeviceModel> updatedList = [];
     bool hasChanges = false;
 
+    final mobileCheckNow = DateTime.now();
     for (final dev in devices) {
       final match = findMatchingRecord(dev, telemetryRecords);
       if (match != null) {
@@ -133,6 +149,9 @@ class TelemetryService {
           mode: updated.mode,
           fan: updated.fan,
           isOnline: updated.isOnline,
+          mobileCheckTime: mobileCheckNow,
+          backendReadingTime: updated.lastReadingTime,
+          rawBackendTs: match['ts']?.toString() ?? match['last_updated']?.toString(),
         );
       } else {
         updatedList.add(dev);
@@ -273,6 +292,167 @@ class TelemetryService {
   String? _lastHardwareDevId;
   String? get lastHardwareDevId => _lastHardwareDevId;
 
+  /// Smart Hybrid Dispatcher:
+  /// 1. Checks if Internet is connected.
+  /// 2. If connected: sends JSON {"dev_Id":"...","tds_range":...,"fan":"..."}
+  ///    to topic 'Shudhham/tds/v1/SubConfig' via Cloud MQTT Backend.
+  /// 3. If NOT connected (or offline): turns on Bluetooth on Android and sends
+  ///    command directly to the ESP32 purifier via Bluetooth LE (BLE).
+  Future<CommandDispatchResult> sendSmartConfig({
+    required String deviceId,
+    String? serialNumber,
+    required int tdsRange,
+    required String fanState,
+    String? rawCommand,
+  }) async {
+    final cleanDevId = _cleanMac(deviceId);
+    final cleanSerial = serialNumber != null ? _cleanMac(serialNumber) : '';
+    String targetHwId;
+    if (cleanDevId.length == 12) {
+      targetHwId = cleanDevId.endsWith('02') ? '${cleanDevId.substring(0, 10)}00' : cleanDevId;
+    } else if (cleanSerial.length == 12) {
+      targetHwId = cleanSerial.endsWith('02') ? '${cleanSerial.substring(0, 10)}00' : cleanSerial;
+    } else if (_lastHardwareDevId != null && _lastHardwareDevId!.isNotEmpty) {
+      targetHwId = _cleanMac(_lastHardwareDevId!);
+    } else {
+      targetHwId = cleanDevId.isNotEmpty ? cleanDevId : cleanSerial;
+    }
+
+    final int effectiveTds = tdsRange > 990 ? 1000 : tdsRange;
+    final String effectiveFan = fanState.toLowerCase().trim() == 'disable' ? 'disable' : 'enable';
+    final String command = rawCommand ?? (effectiveFan == 'disable' ? 'F,0' : (effectiveFan == 'enable' && rawCommand != null ? rawCommand : 'T,$effectiveTds'));
+
+    final subConfigMap = {
+      'dev_Id': targetHwId,
+      'tds_range': effectiveTds,
+      'fan': effectiveFan,
+    };
+    final subConfigJson = jsonEncode(subConfigMap);
+
+    // ============================================================
+    // PRIORITY 1: CLOUD MQTT DISPATCH (INTERNET HIGHEST PRIORITY)
+    // ============================================================
+    bool isOfflineSocketException = false;
+    String lastCloudError = '';
+
+    // Direct Cloud MQTT Attempt (Up to 2 attempts before falling back to Bluetooth)
+    final candidateEndpoints = [
+      '${ApiEndpoints.liveBaseUrl}/telemetry/publish',
+      'http://192.168.1.50:4000/api/telemetry/publish',
+      '${ApiEndpoints.liveBaseUrl}/telemetry/tds',
+    ];
+
+    for (int attempt = 1; attempt <= 2; attempt++) {
+      HttpClient? client;
+      try {
+        debugPrint('[Telemetry] [Priority #1] Attempting Cloud MQTT dispatch (Attempt $attempt/2)...');
+        client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
+
+        bool dispatched = false;
+        for (final endpoint in candidateEndpoints) {
+          try {
+            final req = await client.postUrl(Uri.parse(endpoint));
+            req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+            req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+            req.add(utf8.encode(jsonEncode({
+              'topic': 'Shudhham/tds/v1/SubConfig',
+              'message': subConfigMap,
+              'deviceId': targetHwId,
+              'dev_Id': targetHwId,
+              'tds': effectiveTds,
+              'tds_range': effectiveTds,
+              'fan': effectiveFan,
+              'command': command,
+            })));
+
+            final resp = await req.close().timeout(const Duration(seconds: 8));
+            final respBody = await resp.transform(utf8.decoder).join();
+
+            if (resp.statusCode >= 200 && resp.statusCode < 300) {
+              dispatched = true;
+              debugPrint('[Telemetry] Successfully dispatched single SubConfig via $endpoint: $respBody');
+              break;
+            } else {
+              lastCloudError = '$endpoint returned HTTP ${resp.statusCode}: $respBody';
+            }
+          } catch (endpointErr) {
+            lastCloudError = '$endpoint error: $endpointErr';
+          }
+        }
+
+        if (dispatched) {
+          AppLogger.internetPriorityMqttDispatched(
+            deviceId: targetHwId,
+            topic: 'Shudhham/tds/v1/SubConfig',
+            payload: subConfigMap,
+            command: command,
+            mobileDispatchTime: DateTime.now(),
+          );
+
+          return CommandDispatchResult(
+            success: true,
+            transport: 'mqtt',
+            message: 'Command published via Internet (MQTT): $command',
+          );
+        }
+      } on SocketException catch (se) {
+        isOfflineSocketException = true;
+        lastCloudError = 'SocketException: ${se.message}';
+        debugPrint('[Telemetry] Device offline (SocketException): $lastCloudError');
+        break; // Network socket is unreachable -> phone is offline, break to BLE
+      } catch (e) {
+        lastCloudError = e.toString();
+        debugPrint('[Telemetry] Cloud MQTT dispatch attempt $attempt error: $e');
+        if (attempt < 2) {
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+      } finally {
+        client?.close(force: true);
+      }
+    }
+
+    // ============================================================
+    // PRIORITY 2: BLUETOOTH LE (FALLBACK ONLY WHEN OFFLINE)
+    // ============================================================
+    AppLogger.bleFallbackTriggered(
+      reason: isOfflineSocketException 
+          ? 'No Internet connection (Phone Offline)' 
+          : 'Cloud MQTT unreachable ($lastCloudError)',
+      deviceId: targetHwId,
+    );
+
+    // Turn on Bluetooth if off on Android
+    try {
+      if (Platform.isAndroid) {
+        final state = await FlutterBluePlus.adapterState.first;
+        if (state != BluetoothAdapterState.on) {
+          await FlutterBluePlus.turnOn();
+          await Future.delayed(const Duration(seconds: 1));
+        }
+      }
+    } catch (e) {
+      debugPrint('[BLE] TurnOn Notice: $e');
+    }
+
+    final bleOk = await ProvisioningService.instance.sendBleCommandAuto(
+      targetDeviceId: targetHwId,
+      command: command,
+    );
+
+    // Also send JSON config over BLE characteristic
+    try {
+      await ProvisioningService.instance.sendRawCommand(subConfigJson);
+    } catch (_) {}
+
+    return CommandDispatchResult(
+      success: bleOk,
+      transport: 'ble',
+      message: bleOk 
+        ? 'Internet offline: Command sent directly to purifier via Bluetooth!' 
+        : 'Failed to deliver command via Bluetooth',
+    );
+  }
+
   /// Sends an MQTT downlink command (e.g. "F,0", "F,1") to the purifier via the AWS IoT backend.
   Future<bool> sendCommand({
     required String deviceId,
@@ -283,6 +463,7 @@ class TelemetryService {
     double? temp,
     String? mode,
     int? tdsRange,
+    String? fan,
   }) async {
     HttpClient? client;
     try {
@@ -307,8 +488,36 @@ class TelemetryService {
       // Target direct single downlink topic for purifier
       final targetTopic = 'Shudhham/$targetHwId/v1/command';
 
-      // Send single direct command string ("F,1" or "F,0")
+      // Send single direct command string ("F,1", "F,0", or "T,xxx")
       await _publishSingleMqtt(client, publishUrl, targetTopic, command);
+
+      // Also publish configuration JSON to Shudhham/tds/v1/SubConfig
+      int? finalTds = tdsRange;
+      if (finalTds == null && command.startsWith('T,')) {
+        finalTds = int.tryParse(command.substring(2).trim());
+      }
+      if (finalTds != null && finalTds > 990) {
+        finalTds = 1000;
+      }
+
+      String effectiveFan;
+      if (command == 'F,0') {
+        effectiveFan = 'disable';
+      } else if (command == 'F,1') {
+        effectiveFan = 'enable';
+      } else if (fan != null && fan.isNotEmpty) {
+        effectiveFan = fan.toLowerCase().trim() == 'disable' ? 'disable' : 'enable';
+      } else {
+        effectiveFan = 'enable';
+      }
+
+      final subConfigPayload = jsonEncode({
+        'dev_Id': targetHwId,
+        'tds_range': finalTds ?? 200,
+        'fan': effectiveFan,
+      });
+      await _publishSingleMqtt(client, publishUrl, 'Shudhham/tds/v1/SubConfig', subConfigPayload);
+
       return true;
     } catch (e) {
       debugPrint('[Telemetry] Failed to send MQTT command: $e');

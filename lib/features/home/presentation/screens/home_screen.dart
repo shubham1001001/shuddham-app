@@ -74,8 +74,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         : (userPhone.isNotEmpty ? userPhone : userEmail);
 
     final localList = await DeviceStorageService.getSavedDevices(userKey: userKey);
-    // If local devices already exist, display them immediately so user sees their purifier without lag
-    if (mounted && localList.isNotEmpty && !forceLoader) {
+    // If local devices exist, display them immediately so user sees their purifier container without lag
+    if (mounted && localList.isNotEmpty) {
       setState(() {
         _devices.clear();
         _devices.addAll(localList);
@@ -96,23 +96,45 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           token: UserSession().token,
         );
 
-        // The cloud backend is the single source of truth for customer assigned hardware.
-        await DeviceStorageService.saveDevices(cloudDevices, userKey: userKey);
-        if (mounted) {
-          setState(() {
-            _devices.clear();
-            _devices.addAll(cloudDevices);
-            if (_selectedDeviceIndex >= _devices.length) {
-              _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
-            }
-            _isLoading = false;
-          });
+        // ONLY save & replace if cloud returned real devices.
+        // If offline or network error, cloudDevices will be empty: NEVER overwrite local storage!
+        if (cloudDevices.isNotEmpty) {
+          await DeviceStorageService.saveDevices(cloudDevices, userKey: userKey);
+          if (mounted) {
+            setState(() {
+              _devices.clear();
+              _devices.addAll(cloudDevices);
+              if (_selectedDeviceIndex >= _devices.length) {
+                _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
+              }
+              _isLoading = false;
+            });
+          }
+        } else {
+          // Cloud returned empty or offline: maintain local saved devices!
+          if (mounted && _devices.isEmpty && localList.isNotEmpty) {
+            setState(() {
+              _devices.clear();
+              _devices.addAll(localList);
+              _isLoading = false;
+            });
+          }
         }
       } else {
         if (mounted) setState(() => _isLoading = false);
       }
     } catch (e) {
       debugPrint('[HomeScreen] Cloud assigned devices check error: $e');
+      // Offline fallback: ensure locally saved devices remain visible!
+      if (mounted && _devices.isEmpty) {
+        final fallbackList = await DeviceStorageService.getSavedDevices(userKey: userKey);
+        if (fallbackList.isNotEmpty) {
+          setState(() {
+            _devices.clear();
+            _devices.addAll(fallbackList);
+          });
+        }
+      }
     } finally {
       if (mounted && _isLoading) {
         setState(() => _isLoading = false);
@@ -130,7 +152,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _isSyncing = true;
     try {
       final updated = await TelemetryService.instance.syncDevices(_devices);
-      if (mounted) {
+      if (mounted && updated.isNotEmpty) {
         setState(() {
           _devices.clear();
           _devices.addAll(updated);
@@ -236,46 +258,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() => _isSendingFanCommand = true);
 
     try {
-      // 1. Send via AWS IoT MQTT backend (including Shudhham/tds/v1/data topic)
-      debugPrint('[HomeScreen] 📡 1. Dispatching via AWS IoT MQTT...');
-      final mqttOk = await TelemetryService.instance.sendCommand(
-        deviceId: device.id,
-        serialNumber: device.serialNumber,
-        command: command,
-        tds1: device.inletTdsPpm,
-        tds2: device.tdsPpm,
-        temp: device.temperature,
-        mode: device.mode,
-        tdsRange: device.tdsRange,
-      );
-      debugPrint('[HomeScreen] 📡 MQTT Dispatch Result: $mqttOk');
-
-      // 2. Also send via Bluetooth LE (auto-connects if in range)
-      debugPrint('[HomeScreen] 🔵 2. Dispatching via Bluetooth LE (BLE)...');
-      final bleOk = await ProvisioningService.instance.sendBleCommandAuto(
-        targetDeviceId: device.id,
-        command: command,
-      );
-      debugPrint('[HomeScreen] 🔵 BLE Dispatch Result: $bleOk');
-
-      debugPrint('''
-==============================================================
-✅ [FAN COMMAND COMPLETED]
-   MQTT Delivered: $mqttOk
-   BLE Delivered: $bleOk
-==============================================================''');
-
-      // 3. Update fan state in backend database and local state upon command dispatch
       final fanState = isEnable ? 'enable' : 'disable';
-      await TelemetryService.instance.updateFanStateInBackend(
+      final dispatchResult = await TelemetryService.instance.sendSmartConfig(
         deviceId: device.id,
         serialNumber: device.serialNumber,
+        tdsRange: device.tdsRange ?? 200,
         fanState: fanState,
-        tds1: device.inletTdsPpm,
-        tds2: device.tdsPpm,
-        temp: device.temperature,
-        mode: device.mode,
-        tdsRange: device.tdsRange,
+        rawCommand: command,
       );
 
       final updatedDevice = device.copyWith(fan: fanState);
@@ -298,22 +287,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               content: Row(
                 children: [
                   Icon(
-                    isEnable ? Icons.check_circle_rounded : Icons.info_outline_rounded,
+                    dispatchResult.success ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
                     color: Colors.white,
                     size: 20,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      isEnable
-                          ? 'Fan enabled via Wi-Fi (Command "F,1" sent)!'
-                          : 'Fan disabled via Wi-Fi (Command "F,0" sent)!',
+                      dispatchResult.message,
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
                 ],
               ),
-              backgroundColor: isEnable ? AppTheme.accentGreen : const Color(0xFF334155),
+              backgroundColor: dispatchResult.transport == 'mqtt' 
+                  ? AppTheme.accentGreen 
+                  : (dispatchResult.success ? Colors.blue.shade700 : Colors.red.shade700),
               behavior: SnackBarBehavior.floating,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               margin: const EdgeInsets.all(16),
@@ -494,13 +483,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       device: device,
       onRemove: () => _unpairDeviceWithHardwareReset(device),
       onSync: () async {
+        // Re-read local storage first so offline changes (TDS, fan) are immediately updated in UI
+        final localDevices = await DeviceStorageService.getSavedDevices();
+        if (mounted && localDevices.isNotEmpty) {
+          setState(() {
+            _devices.clear();
+            _devices.addAll(localDevices);
+          });
+        }
         await _syncTelemetry();
         if (mounted) {
           final current = _devices.isNotEmpty && index < _devices.length ? _devices[index] : device;
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Synced live sensor data for ${current.name}: TDS ${current.tdsPpm} PPM'
+                'Updated hardware details for ${current.name}: TDS ${current.tdsPpm} PPM'
                 '${current.temperature != null ? ', ${current.temperature!.toStringAsFixed(1)}°C' : ''}!',
               ),
               backgroundColor: AppTheme.royalBlue,
@@ -715,6 +712,35 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             _buildTopHeader(isConnected: true),
 
             const SizedBox(height: 16),
+
+            // Offline Indicator Banner if hardware is not online
+            if (activeDevice != null && !activeDevice.isOnline) ...[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFCBD5E1)),
+                ),
+                child: Row(
+                  children: const [
+                    Icon(Icons.cloud_off_rounded, color: Color(0xFF64748B), size: 18),
+                    SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Offline Mode: Hardware container loaded from local storage. Direct Bluetooth control available.',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF334155),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+            ],
 
             // Devices: Full width when single device paired, carousel when multiple
             if (_devices.length == 1)

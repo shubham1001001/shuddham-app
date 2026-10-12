@@ -414,8 +414,21 @@ class ProvisioningService {
     }
   }
 
+  /// Normalizes any 12-char or raw hex MAC address to Android standard colon-separated format (e.g. 28:05:A5:20:C4:00)
+  static String? normalizeToValidBleMac(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return null;
+    final clean = raw.replaceAll(':', '').replaceAll('-', '').trim().toUpperCase();
+    if (clean.length == 12 && RegExp(r'^[0-9A-F]{12}$').hasMatch(clean)) {
+      return '${clean.substring(0, 2)}:${clean.substring(2, 4)}:${clean.substring(4, 6)}:${clean.substring(6, 8)}:${clean.substring(8, 10)}:${clean.substring(10, 12)}';
+    }
+    if (RegExp(r'^([0-9A-F]{2}:){5}[0-9A-F]{2}$').hasMatch(raw.toUpperCase())) {
+      return raw.toUpperCase();
+    }
+    return null;
+  }
+
   /// Attempts to send command over BLE. If not already connected,
-  /// tries to connect to the target device or scans for the purifier in range.
+  /// safely scans for the purifier in range and connects using native BLE references.
   Future<bool> sendBleCommandAuto({String? targetDeviceId, required String command}) async {
     // 1. If already connected, send directly
     if (_commChar != null && _connectedDevice != null && _connectedDevice!.isConnected) {
@@ -433,11 +446,54 @@ class ProvisioningService {
       return false;
     }
 
-    // 3. Try connecting directly by ID if provided
-    if (targetDeviceId != null && targetDeviceId.isNotEmpty) {
+    final cleanTarget = targetDeviceId?.replaceAll(':', '').toLowerCase() ?? '';
+    final validMac = normalizeToValidBleMac(targetDeviceId);
+
+    // 3. Quick scan for nearby Shuddham purifier (native safe discovery, avoids Android IllegalArgumentException)
+    try {
+      debugPrint('[BLE Quick Scan] Scanning for nearby purifier hardware (Target: $cleanTarget)...');
+      final discovered = await scanDevices(timeout: const Duration(seconds: 4));
+      
+      DiscoveredBleDevice? bestMatch;
+      // Primary: match by exact MAC or SoftAP variant (...00 STA vs ...02 BLE advertisement)
+      for (final d in discovered) {
+        final dRemoteClean = d.device.remoteId.str.replaceAll(':', '').toLowerCase();
+        final matchesMac = cleanTarget.isNotEmpty &&
+            (dRemoteClean == cleanTarget ||
+             (cleanTarget.endsWith('00') && dRemoteClean == '${cleanTarget.substring(0, 10)}02') ||
+             (cleanTarget.endsWith('02') && dRemoteClean == '${cleanTarget.substring(0, 10)}00'));
+        if (matchesMac) {
+          bestMatch = d;
+          break;
+        }
+      }
+
+      // Secondary: match by device name
+      if (bestMatch == null) {
+        for (final d in discovered) {
+          if (d.isPurifier || d.name.toUpperCase().contains('SHUDDHAM') || d.name.toUpperCase().startsWith('SHD-')) {
+            bestMatch = d;
+            break;
+          }
+        }
+      }
+
+      if (bestMatch != null) {
+        debugPrint('[BLE Auto-Connect] Found purifier: ${bestMatch.name} (${bestMatch.device.remoteId}). Connecting...');
+        await connect(bestMatch.device).timeout(const Duration(seconds: 5));
+        if (_commChar != null) {
+          return await sendRawCommand(command);
+        }
+      }
+    } catch (e) {
+      debugPrint('[BLE Quick Scan Error] $e');
+    }
+
+    // 4. Safe fallback: Direct connect ONLY if validMac is guaranteed valid colon-formatted (17-chars)
+    if (validMac != null) {
       try {
-        debugPrint('[BLE Auto-Connect] Trying direct connect to: $targetDeviceId');
-        final bleDevice = BluetoothDevice.fromId(targetDeviceId);
+        debugPrint('[BLE Auto-Connect] Trying fallback direct connect to valid MAC: $validMac');
+        final bleDevice = BluetoothDevice.fromId(validMac);
         await connect(bleDevice).timeout(const Duration(seconds: 4));
         if (_commChar != null) {
           return await sendRawCommand(command);
@@ -445,23 +501,6 @@ class ProvisioningService {
       } catch (e) {
         debugPrint('[BLE Direct Connect Error] $e');
       }
-    }
-
-    // 4. Quick scan (3 seconds) for any nearby Shuddham purifier
-    try {
-      debugPrint('[BLE Quick Scan] Scanning for nearby purifier...');
-      final discovered = await scanDevices(timeout: const Duration(seconds: 3));
-      for (final d in discovered) {
-        if (d.isPurifier || d.name.toUpperCase().contains('SHUDDHAM') || d.name.toUpperCase().startsWith('SHD-')) {
-          debugPrint('[BLE Quick Scan] Found purifier: ${d.name} (${d.device.remoteId}). Connecting...');
-          await connect(d.device).timeout(const Duration(seconds: 4));
-          if (_commChar != null) {
-            return await sendRawCommand(command);
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint('[BLE Quick Scan Error] $e');
     }
 
     return false;

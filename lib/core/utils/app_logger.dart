@@ -23,6 +23,31 @@ class AppLogger {
     return '$h:$m:$s.$ms';
   }
 
+  /// Formats a DateTime object into readable DD/MM/YYYY HH:mm:ss format
+  static String formatTimestamp(DateTime? dt) {
+    if (dt == null) return '--';
+    final local = dt.isUtc ? dt.toLocal() : dt;
+    final d = local.day.toString().padLeft(2, '0');
+    final mo = local.month.toString().padLeft(2, '0');
+    final y = local.year.toString();
+    final h = local.hour.toString().padLeft(2, '0');
+    final m = local.minute.toString().padLeft(2, '0');
+    final s = local.second.toString().padLeft(2, '0');
+    return '$d/$mo/$y $h:$m:$s';
+  }
+
+  /// Calculates human-readable time difference between two dates (e.g. "12s ago", "4m 10s ago")
+  static String timeDifferenceString(DateTime? from, [DateTime? to]) {
+    if (from == null) return 'Unknown';
+    final target = to ?? DateTime.now();
+    final diff = target.difference(from.isUtc ? from.toLocal() : from);
+    if (diff.isNegative || diff.inSeconds < 5) return 'Just now (< 5s)';
+    if (diff.inSeconds < 60) return '${diff.inSeconds}s ago';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m ${diff.inSeconds % 60}s ago';
+    if (diff.inHours < 24) return '${diff.inHours}h ${diff.inMinutes % 60}m ago';
+    return '${diff.inDays}d ago';
+  }
+
   static void _printBlock(String content) {
     for (final line in content.split('\n')) {
       if (line.isNotEmpty) {
@@ -224,6 +249,67 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
 ╚══════════════════════════════════════════════════════════════════''');
   }
 
+  static void tdsCommandSent({
+    required String deviceId,
+    required double rawTds,
+    required int finalTds,
+    required String command,
+    required String topic,
+  }) {
+    final snappedNote = rawTds > 990.0 ? " (Rule Applied: Snapped to 1000 PPM because > 990)" : "";
+    _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ 💧 [TDS COMMAND TRANSMITTED] • ${_timeNow()}
+║ 🎯 Device ID    : $deviceId
+║ 🎚️ Selected TDS : ${rawTds.toStringAsFixed(0)} PPM$snappedNote
+║ 💬 MQTT Command : "$command"
+║ 📮 Target Topic : $topic
+║ ✅ Dispatched via Cloud MQTT & Live Backend
+╚══════════════════════════════════════════════════════════════════''');
+  }
+
+  static void internetPriorityMqttDispatched({
+    required String deviceId,
+    required String topic,
+    required Map<String, dynamic> payload,
+    required String command,
+    DateTime? mobileDispatchTime,
+    DateTime? backendLastReadingTime,
+  }) {
+    final dispatchTime = mobileDispatchTime ?? DateTime.now();
+    final backendDiff = backendLastReadingTime != null
+        ? ' (${timeDifferenceString(backendLastReadingTime, dispatchTime)})'
+        : '';
+    final backendTsFormatted = backendLastReadingTime != null
+        ? formatTimestamp(backendLastReadingTime)
+        : 'Live Snapshot';
+
+    _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ 🌐 [INTERNET CONNECTED • PRIORITY #1 CLOUD MQTT] • ${_timeNow()}
+║ 🎯 Target Dev       : $deviceId
+║ 📮 Target Topic     : $topic
+║ 📦 JSON Payload     : ${jsonEncode(payload)}
+║ 💬 Hardware Cmd     : "$command"
+║ 📱 Mobile Dispatched: ${formatTimestamp(dispatchTime)} (Live)
+║ ☁️ Backend State Ts : $backendTsFormatted$backendDiff
+║ ✅ Status            : Dispatched to Cloud Backend -> Published to AWS IoT Core MQTT
+╚══════════════════════════════════════════════════════════════════''');
+  }
+
+  static void bleFallbackTriggered({
+    required String reason,
+    required String deviceId,
+  }) {
+    _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ 🔵 [OFFLINE BLE FALLBACK TRIGGERED] • ${_timeNow()}
+║ ⚠️ Reason    : $reason
+║ 🎯 Target Dev: $deviceId
+║ 📶 Action    : Activating Bluetooth & Connecting directly to ESP32 Purifier
+╚══════════════════════════════════════════════════════════════════''');
+  }
+
   static void telemetryReceived({
     required String deviceId,
     required int? tds1,
@@ -232,11 +318,24 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
     required String? mode,
     required String? fan,
     required bool isOnline,
+    DateTime? mobileCheckTime,
+    DateTime? backendReadingTime,
+    String? rawBackendTs,
   }) {
+    final checkTime = mobileCheckTime ?? DateTime.now();
+    final diffStr = backendReadingTime != null 
+        ? timeDifferenceString(backendReadingTime, checkTime)
+        : (rawBackendTs ?? 'Live');
+    final backendFormatted = backendReadingTime != null
+        ? formatTimestamp(backendReadingTime)
+        : (rawBackendTs ?? '--');
+
     _printBlock('''
 ╔══════════════════════════════════════════════════════════════════
 ║ 📊 [LIVE SENSOR TELEMETRY SYNC] • ${_timeNow()}
 ║ 🆔 Device: $deviceId | Status: ${isOnline ? "🟢 ONLINE" : "🔴 OFFLINE"}
+║ 📱 Mobile Checked At  : ${formatTimestamp(checkTime)} (Just now)
+║ ☁️ Backend Hardware Ts: $backendFormatted ($diffStr)
 ║ 💧 Outlet TDS: ${tds2 ?? tds1 ?? "--"} PPM | Inlet TDS: ${tds1 ?? "--"} PPM
 ║ 🌡️ Temperature: ${temp != null ? "${temp.toStringAsFixed(1)}°C" : "--"}
 ║ ⚙️ Mode: ${mode ?? "--"} | Fan: ${fan ?? "--"}

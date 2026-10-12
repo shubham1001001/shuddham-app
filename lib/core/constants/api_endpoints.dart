@@ -267,5 +267,14 @@ class ApiEndpoints {
 
   /// GET — Get historical telemetry logs for a device → '/telemetry/:devId'
   static String deviceTelemetryHistory(String devId) => '/telemetry/$devId';
+
+  /// POST — Send TDS value command (e.g. 'T,90') to purifier device
+  static const String telemetryTds = '/telemetry/tds';
+
+  /// POST — Send command with specific device ID → '/telemetry/:devId/tds'
+  static String deviceTds(String devId) => '/telemetry/$devId/tds';
+
+  /// POST — Send raw command to device → '/telemetry/command'
+  static const String telemetryCommand = '/telemetry/command';
 }
 
