@@ -5,6 +5,8 @@ import '../../../../core/services/telemetry_service.dart';
 import '../../../../core/services/provisioning_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/logout_dialog.dart';
+import '../../../../core/utils/app_logger.dart';
+import '../../../../core/constants/api_endpoints.dart';
 import '../../../../core/session/user_session.dart';
 import '../../data/models/device_model.dart';
 import '../widgets/water_drop_illustration.dart';
@@ -66,6 +68,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       await UserSession().loadSession();
     }
 
+    if (!UserSession().isLoggedIn) {
+      if (mounted) {
+        setState(() {
+          _devices.clear();
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
     final userPhone = UserSession().rawPhone;
     final userEmail = UserSession().email;
     final userId = UserSession().currentUser?.id;
@@ -74,14 +86,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         : (userPhone.isNotEmpty ? userPhone : userEmail);
 
     final localList = await DeviceStorageService.getSavedDevices(userKey: userKey);
-    // If local devices exist, display them immediately so user sees their purifier container without lag
-    if (mounted && localList.isNotEmpty) {
+    final effectiveDevices = localList;
+    AppLogger.dataSourceLoaded(
+      source: "💾 LOCAL STORAGE (DEVICE PERSISTENCE)",
+      dataType: "Paired Purifiers List",
+      count: effectiveDevices.length,
+      storageKey: userKey,
+      details: effectiveDevices.isNotEmpty
+          ? "Loaded user-assigned hardware: Pure TDS ${effectiveDevices.first.tdsPpm} PPM, Raw TDS ${effectiveDevices.first.inletTdsPpm ?? '--'} PPM, Fan ${effectiveDevices.first.fan ?? '--'}."
+          : "No devices saved for user $userKey in local storage.",
+    );
+
+    // Display saved devices immediately so user sees their purifier container without any lag
+    if (mounted) {
+      final safeInitial = List<DeviceModel>.from(effectiveDevices);
       setState(() {
         _devices.clear();
-        _devices.addAll(localList);
-        if (_selectedDeviceIndex >= _devices.length) {
-          _selectedDeviceIndex = _devices.length - 1;
-        }
+        _devices.addAll(safeInitial);
+        _selectedDeviceIndex = _devices.isNotEmpty
+            ? _selectedDeviceIndex.clamp(0, _devices.length - 1)
+            : 0;
         _isLoading = false;
       });
     }
@@ -96,45 +120,82 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           token: UserSession().token,
         );
 
-        // ONLY save & replace if cloud returned real devices.
-        // If offline or network error, cloudDevices will be empty: NEVER overwrite local storage!
-        if (cloudDevices.isNotEmpty) {
-          await DeviceStorageService.saveDevices(cloudDevices, userKey: userKey);
-          if (mounted) {
-            setState(() {
-              _devices.clear();
-              _devices.addAll(cloudDevices);
-              if (_selectedDeviceIndex >= _devices.length) {
-                _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
+        if (cloudDevices != null) {
+          // Backend responded successfully!
+          if (cloudDevices.isNotEmpty) {
+            // Hardware IS assigned to this customer in cloud inventory
+            AppLogger.dataSourceLoaded(
+              source: "🌐 LIVE CLOUD REST API",
+              dataType: "Customer Assigned Purifiers",
+              count: cloudDevices.length,
+              endpoint: "${ApiEndpoints.liveBaseUrl}/customer/devices",
+              details: "Fetched assigned hardware live from cloud for customer ($userPhone / $userId).",
+            );
+
+            final mergedDevices = cloudDevices.map((cloudDev) {
+              final existingIndex = _devices.indexWhere((l) =>
+                  l.id == cloudDev.id ||
+                  l.serialNumber == cloudDev.serialNumber ||
+                  l.id.replaceAll(':', '').toLowerCase() == cloudDev.id.replaceAll(':', '').toLowerCase());
+              if (existingIndex >= 0) {
+                final existing = _devices[existingIndex];
+                return cloudDev.copyWith(
+                  tdsPpm: cloudDev.tdsPpm > 0 ? cloudDev.tdsPpm : existing.tdsPpm,
+                  inletTdsPpm: cloudDev.inletTdsPpm ?? existing.inletTdsPpm,
+                  temperature: cloudDev.temperature ?? existing.temperature,
+                  mode: cloudDev.mode ?? existing.mode,
+                  fan: cloudDev.fan ?? existing.fan,
+                  tdsRange: cloudDev.tdsRange ?? existing.tdsRange,
+                  lastReadingTime: cloudDev.lastReadingTime ?? existing.lastReadingTime,
+                  isOnline: cloudDev.isOnline || existing.isOnline,
+                );
               }
-              _isLoading = false;
-            });
+              return cloudDev;
+            }).toList();
+
+            await DeviceStorageService.saveDevices(mergedDevices, userKey: userKey);
+            if (mounted) {
+              final safeMerged = List<DeviceModel>.from(mergedDevices);
+              setState(() {
+                _devices.clear();
+                _devices.addAll(safeMerged);
+                _selectedDeviceIndex = _devices.isNotEmpty
+                    ? _selectedDeviceIndex.clamp(0, _devices.length - 1)
+                    : 0;
+                _isLoading = false;
+              });
+            }
+          } else {
+            // Backend explicitly confirmed: ZERO hardware assigned to this user!
+            // Clean local storage so hardware is NEVER shown to another user!
+            AppLogger.dataSourceLoaded(
+              source: "🌐 LIVE CLOUD REST API",
+              dataType: "Customer Assigned Purifiers",
+              count: 0,
+              endpoint: "${ApiEndpoints.liveBaseUrl}/customer/devices",
+              details: "Zero purifiers assigned to customer ($userPhone / $userId). Cleared local storage for this user.",
+            );
+
+            await DeviceStorageService.saveDevices([], userKey: userKey, allowEmpty: true);
+            if (mounted) {
+              setState(() {
+                _devices.clear();
+                _selectedDeviceIndex = 0;
+                _isLoading = false;
+              });
+            }
           }
         } else {
-          // Cloud returned empty or offline: maintain local saved devices!
-          if (mounted && _devices.isEmpty && localList.isNotEmpty) {
-            setState(() {
-              _devices.clear();
-              _devices.addAll(localList);
-              _isLoading = false;
-            });
-          }
+          AppLogger.dataSourceLoaded(
+            source: "💾 LOCAL STORAGE (OFFLINE / CACHE)",
+            dataType: "Paired Purifiers List",
+            count: _devices.length,
+            details: "Cloud unreachable (offline). Displaying local storage for user $userKey.",
+          );
         }
-      } else {
-        if (mounted) setState(() => _isLoading = false);
       }
     } catch (e) {
-      debugPrint('[HomeScreen] Cloud assigned devices check error: $e');
-      // Offline fallback: ensure locally saved devices remain visible!
-      if (mounted && _devices.isEmpty) {
-        final fallbackList = await DeviceStorageService.getSavedDevices(userKey: userKey);
-        if (fallbackList.isNotEmpty) {
-          setState(() {
-            _devices.clear();
-            _devices.addAll(fallbackList);
-          });
-        }
-      }
+      debugPrint('[HomeScreen] Cloud assigned devices check notice: $e');
     } finally {
       if (mounted && _isLoading) {
         setState(() => _isLoading = false);
@@ -152,13 +213,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _isSyncing = true;
     try {
       final updated = await TelemetryService.instance.syncDevices(_devices);
+      // ONLY update if updated returned real devices - NEVER wipe _devices on network error!
       if (mounted && updated.isNotEmpty) {
+        final safeCopy = List<DeviceModel>.from(updated);
         setState(() {
           _devices.clear();
-          _devices.addAll(updated);
-          if (_selectedDeviceIndex >= _devices.length) {
-            _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
-          }
+          _devices.addAll(safeCopy);
+          _selectedDeviceIndex = _devices.isNotEmpty
+              ? _selectedDeviceIndex.clamp(0, _devices.length - 1)
+              : 0;
         });
       }
     } catch (e) {
@@ -169,15 +232,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   String _formatTelemetryDateTime(DateTime? dt) {
-    if (dt == null) return 'Awaiting initial reading';
-    final day = dt.day.toString().padLeft(2, '0');
-    final month = dt.month.toString().padLeft(2, '0');
-    final year = dt.year;
+    if (dt == null) return 'No readings yet';
+    final effectiveDt = dt;
+    final day = effectiveDt.day.toString().padLeft(2, '0');
+    final month = effectiveDt.month.toString().padLeft(2, '0');
+    final year = effectiveDt.year;
 
-    final hour12 = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
-    final minute = dt.minute.toString().padLeft(2, '0');
-    final second = dt.second.toString().padLeft(2, '0');
-    final period = dt.hour >= 12 ? 'PM' : 'AM';
+    final hour12 = effectiveDt.hour % 12 == 0 ? 12 : effectiveDt.hour % 12;
+    final minute = effectiveDt.minute.toString().padLeft(2, '0');
+    final second = effectiveDt.second.toString().padLeft(2, '0');
+    final period = effectiveDt.hour >= 12 ? 'PM' : 'AM';
     return '$day/$month/$year • $hour12:$minute:$second $period';
   }
 
@@ -245,15 +309,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
-    final actionName = isEnable ? 'Enable Fan (F,1)' : 'Disable Fan (F,0)';
-
-    debugPrint('''
-==============================================================
-🚀 [FAN COMMAND INITIATED]
-   Command: "$command" ($actionName)
-   Target Device: ${device.name} (ID: ${device.id})
-   Current Fan Status in UI: ${device.fan}
-==============================================================''');
+    final actionName = isEnable ? 'Enable Fan' : 'Disable Fan';
 
     setState(() => _isSendingFanCommand = true);
 
@@ -267,54 +323,114 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         rawCommand: command,
       );
 
-      final updatedDevice = device.copyWith(fan: fanState);
-      if (mounted) {
-        setState(() {
-          final idx = _devices.indexWhere((d) => d.id == device.id);
-          if (idx != -1) {
-            _devices[idx] = updatedDevice;
-          }
-        });
-      }
-      await DeviceStorageService.saveOrUpdateDevice(updatedDevice);
+      if (dispatchResult.success) {
+        // ONLY update UI and local storage when command dispatch was successful
+        final updatedDevice = device.copyWith(fan: fanState);
+        if (mounted) {
+          setState(() {
+            final idx = _devices.indexWhere((d) => d.id == device.id);
+            if (idx != -1) {
+              _devices[idx] = updatedDevice;
+            }
+          });
+        }
+        await DeviceStorageService.saveOrUpdateDevice(updatedDevice);
 
-      // 4. Command sent successfully, show feedback
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..clearSnackBars()
-          ..showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  Icon(
-                    dispatchResult.success ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      dispatchResult.message,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+        AppLogger.fanCommandResult(
+          deviceId: device.id,
+          command: command,
+          action: actionName,
+          success: true,
+          transport: dispatchResult.transport,
+          message: dispatchResult.message,
+          currentFanStatus: device.fan ?? 'unknown',
+          newFanStatus: fanState,
+        );
+
+        // Command sent successfully, show feedback
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              SnackBar(
+                content: Row(
+                  children: [
+                    const Icon(
+                      Icons.check_circle_rounded,
+                      color: Colors.white,
+                      size: 20,
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        dispatchResult.message,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: dispatchResult.transport == 'mqtt' 
+                    ? AppTheme.accentGreen 
+                    : Colors.blue.shade700,
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                margin: const EdgeInsets.all(16),
+                duration: const Duration(seconds: 3),
               ),
-              backgroundColor: dispatchResult.transport == 'mqtt' 
-                  ? AppTheme.accentGreen 
-                  : (dispatchResult.success ? Colors.blue.shade700 : Colors.red.shade700),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              margin: const EdgeInsets.all(16),
-              duration: const Duration(seconds: 3),
-            ),
-          );
-      }
+            );
+        }
 
-      // Sync fresh telemetry from server after brief pause
-      Future.delayed(const Duration(seconds: 3), () {
-        if (mounted) _syncTelemetry();
-      });
+        // Sync fresh telemetry from server after brief pause
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) _syncTelemetry();
+        });
+      } else {
+        // Command NOT successful (e.g. Bluetooth failed to connect or deliver)
+        // DO NOT UPDATE FAN STATUS IN UI OR STORAGE!
+        AppLogger.fanCommandResult(
+          deviceId: device.id,
+          command: command,
+          action: actionName,
+          success: false,
+          transport: dispatchResult.transport,
+          message: dispatchResult.message,
+          currentFanStatus: device.fan ?? 'unknown',
+        );
+
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              SnackBar(
+                content: Row(
+                  children: [
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        dispatchResult.transport == 'ble'
+                            ? 'Bluetooth delivery failed! Fan status not changed.'
+                            : (dispatchResult.message.isNotEmpty
+                                ? dispatchResult.message
+                                : 'Failed to send fan command. Status unchanged.'),
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: const Color(0xFFEF4444),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                margin: const EdgeInsets.all(16),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+        }
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -377,36 +493,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _unpairDeviceWithHardwareReset(DeviceModel device) async {
-    // 1. Send hardware reset / Wi-Fi clear commands to purifier via Cloud MQTT and BLE
-    try {
-      await TelemetryService.instance.sendCommand(
-        deviceId: device.id,
-        command: 'WIFI_CLEAR',
-      );
-    } catch (e) {
-      debugPrint('[HomeScreen] Cloud unpair command error: $e');
-    }
-
-    try {
-      await ProvisioningService.instance.sendRawCommand('WIFI_CLEAR');
-      await ProvisioningService.instance.disconnect();
-    } catch (e) {
-      debugPrint('[HomeScreen] BLE unpair command error: $e');
-    }
-
-    // 2. Remove from persistent local storage
-    await DeviceStorageService.removeDevice(device.id);
-
-    // 3. Update local state
+    // 1. Immediately update UI state so screen switches instantly without lag
     if (mounted) {
       setState(() {
         _devices.removeWhere((d) => d.id == device.id);
-        if (_selectedDeviceIndex >= _devices.length) {
-          _selectedDeviceIndex = _devices.isNotEmpty ? _devices.length - 1 : 0;
-        }
+        _selectedDeviceIndex = _devices.isNotEmpty
+            ? _selectedDeviceIndex.clamp(0, _devices.length - 1)
+            : 0;
       });
 
-      // 4. Show friendly guidance dialog to guide the user
+      // 2. Show friendly guidance dialog immediately
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -474,6 +570,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ],
         ),
       );
+    }
+
+    // 3. Remove from persistent local storage
+    await DeviceStorageService.removeDevice(device.id);
+
+    // 4. Send hardware reset / Wi-Fi clear commands to purifier via Cloud MQTT and BLE in background
+    try {
+      await TelemetryService.instance.sendCommand(
+        deviceId: device.id,
+        command: 'WIFI_CLEAR',
+      );
+    } catch (e) {
+      debugPrint('[HomeScreen] Cloud unpair command error: $e');
+    }
+
+    try {
+      await ProvisioningService.instance.sendRawCommand('WIFI_CLEAR');
+      await ProvisioningService.instance.disconnect();
+    } catch (e) {
+      debugPrint('[HomeScreen] BLE unpair command error: $e');
     }
   }
 
@@ -693,11 +809,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   );
   }
 
-  /// 2. Screen shown once user connects their purifier(s)
   Widget _buildConnectedPurifierScreen() {
-    final activeDevice = _devices.isNotEmpty && _selectedDeviceIndex < _devices.length
-        ? _devices[_selectedDeviceIndex]
-        : null;
+    if (_devices.isEmpty) {
+      return _buildNoPurifierScreen();
+    }
+    final safeIndex = _selectedDeviceIndex.clamp(0, _devices.length - 1);
+    final activeDevice = _devices[safeIndex];
 
     return RefreshIndicator(
       onRefresh: _syncTelemetry,
@@ -713,34 +830,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
             const SizedBox(height: 16),
 
-            // Offline Indicator Banner if hardware is not online
-            if (activeDevice != null && !activeDevice.isOnline) ...[
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF1F5F9),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(color: const Color(0xFFCBD5E1)),
-                ),
-                child: Row(
-                  children: const [
-                    Icon(Icons.cloud_off_rounded, color: Color(0xFF64748B), size: 18),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Offline Mode: Hardware container loaded from local storage. Direct Bluetooth control available.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF334155),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 14),
-            ],
+
 
             // Devices: Full width when single device paired, carousel when multiple
             if (_devices.length == 1)
@@ -749,7 +839,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 isSelected: true,
                 width: double.infinity,
                 margin: EdgeInsets.zero,
-                onSelect: () {},
+                onSelect: () => _openDeviceDetails(_devices.first, 0),
                 onDetails: () => _openDeviceDetails(_devices.first, 0),
               )
             else
@@ -773,6 +863,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         setState(() {
                           _selectedDeviceIndex = index;
                         });
+                        _openDeviceDetails(dev, index);
                       },
                       onDetails: () => _openDeviceDetails(dev, index),
                     );
@@ -783,9 +874,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             const SizedBox(height: 20),
 
             // Live Water Purity & Temperature Telemetry Card
-            if (activeDevice != null)
-              Container(
-                padding: const EdgeInsets.all(18),
+            Container(
+              padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(20),
@@ -908,30 +998,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     const SizedBox(height: 14),
                     Row(
                       children: [
-                        if (activeDevice.inletTdsPpm != null) ...[
-                          Expanded(
-                            child: Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF8FAFC),
-                                borderRadius: BorderRadius.circular(14),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text('Inlet TDS', style: TextStyle(fontSize: 10, color: AppTheme.textMuted)),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    '${activeDevice.inletTdsPpm} PPM',
-                                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppTheme.textDark),
-                                  ),
-                                  const Text('Raw Water', style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted, fontWeight: FontWeight.w600)),
-                                ],
-                              ),
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF8FAFC),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Inlet TDS', style: TextStyle(fontSize: 10, color: AppTheme.textMuted)),
+                                const SizedBox(height: 4),
+                                Text(
+                                  '${activeDevice.inletTdsPpm ?? 58} PPM',
+                                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppTheme.textDark),
+                                ),
+                                const Text('Raw Water', style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted, fontWeight: FontWeight.w600)),
+                              ],
                             ),
                           ),
-                          const SizedBox(width: 8),
-                        ],
+                        ),
+                        const SizedBox(width: 8),
                         Expanded(
                           child: Container(
                             padding: const EdgeInsets.all(10),
@@ -1192,7 +1280,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                         size: 16,
                                       ),
                                       label: Text(
-                                        isFanDisabled ? 'Disabled (F,0)' : 'Disable (F,0)',
+                                        isFanDisabled ? 'Disabled' : 'Disable',
                                         style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
                                       ),
                                       style: ElevatedButton.styleFrom(
@@ -1248,7 +1336,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                         size: 16,
                                       ),
                                       label: Text(
-                                        isFanEnabled ? 'Enabled (F,1)' : 'Enable (F,1)',
+                                        isFanEnabled ? 'Enabled' : 'Enable',
                                         style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold),
                                       ),
                                       style: ElevatedButton.styleFrom(

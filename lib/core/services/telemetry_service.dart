@@ -31,6 +31,12 @@ class TelemetryService {
 
   static const String _telemetryUrl = '${ApiEndpoints.liveBaseUrl}/telemetry/latest';
 
+  // In-flight command tracking to preserve local state until DB updates with hardware response
+  static final Map<String, DateTime> _pendingFanCommandTimes = {};
+  static final Map<String, String> _pendingFanStates = {};
+  static final Map<String, DateTime> _pendingTdsCommandTimes = {};
+  static final Map<String, int> _pendingTdsRanges = {};
+
   /// Fetches latest telemetry records for all purifiers from the cloud.
   Future<List<Map<String, dynamic>>> fetchAllTelemetry() async {
     HttpClient? client;
@@ -60,7 +66,9 @@ class TelemetryService {
 
   /// Fetches purifiers officially assigned & installed for this customer from the cloud.
   /// Matches strictly against customer phone, email, customerId, or authenticated Bearer token.
-  Future<List<DeviceModel>> fetchCustomerDevices({
+  /// Returns `List<DeviceModel>` (which may be empty [] if user has no assigned devices) on success,
+  /// or null if the network is offline or request fails.
+  Future<List<DeviceModel>?> fetchCustomerDevices({
     String? userPhone,
     String? email,
     String? customerId,
@@ -72,7 +80,7 @@ class TelemetryService {
     final jwt = (token != null && token.isNotEmpty) ? token : UserSession().token;
 
     if (phone.isEmpty && mail.isEmpty && cid.isEmpty && jwt.isEmpty) {
-      return [];
+      return null;
     }
 
     HttpClient? client;
@@ -114,45 +122,84 @@ class TelemetryService {
           return list;
         }
       }
+      return null;
     } catch (e) {
       debugPrint('[Telemetry] Failed to fetch customer assigned devices: $e');
+      return null;
     } finally {
       client?.close(force: true);
     }
-    return [];
   }
+
+  static String? _lastLoggedSource;
+  static final Map<String, String> _lastLoggedSignatures = {};
+  static DateTime? _lastFullLogTime;
 
   /// Syncs an active list of [DeviceModel] instances with real-time sensor data from the backend.
   /// Updates local persistent storage with the new sensor readings.
   Future<List<DeviceModel>> syncDevices(List<DeviceModel> devices) async {
-    if (devices.isEmpty) return devices;
+    if (devices.isEmpty) return [];
 
     final telemetryRecords = await fetchAllTelemetry();
-    if (telemetryRecords.isEmpty) return devices;
+    final mobileCheckNow = DateTime.now();
+    final isCloud = telemetryRecords.isNotEmpty;
+    final currentSource = isCloud ? "🌐 LIVE CLOUD API" : "💾 LOCAL STORAGE (OFFLINE CACHE)";
+
+    // Only log data source change when the source switches (e.g. cloud -> offline cache)
+    if (_lastLoggedSource != currentSource) {
+      _lastLoggedSource = currentSource;
+      AppLogger.dataSourceLoaded(
+        source: currentSource,
+        dataType: "Sensor Telemetry (TDS / Temp / Relay)",
+        count: isCloud ? telemetryRecords.length : devices.length,
+        endpoint: isCloud ? _telemetryUrl : null,
+        details: isCloud
+            ? "Connected to live IoT cloud backend."
+            : "Live cloud unreachable. Displaying persistent storage cache.",
+      );
+    }
+
+    if (telemetryRecords.isEmpty) {
+      return List<DeviceModel>.from(devices);
+    }
+
+    final bool shouldHeartbeat = _lastFullLogTime == null ||
+        mobileCheckNow.difference(_lastFullLogTime!).inSeconds >= 60;
 
     final List<DeviceModel> updatedList = [];
     bool hasChanges = false;
 
-    final mobileCheckNow = DateTime.now();
     for (final dev in devices) {
       final match = findMatchingRecord(dev, telemetryRecords);
       if (match != null) {
         final updated = applyTelemetryToDevice(dev, match);
         updatedList.add(updated);
-        hasChanges = true;
+        final signature = '${updated.id}_${updated.tdsPpm}_${updated.inletTdsPpm}_${updated.temperature}_${updated.fan}_${updated.tdsRange}_${updated.isOnline}_${updated.lastReadingTime}';
+        final isStateChanged = _lastLoggedSignatures[updated.id] != signature;
+        if (isStateChanged) {
+          hasChanges = true;
+        }
 
-        AppLogger.telemetryReceived(
-          deviceId: updated.id,
-          tds1: updated.inletTdsPpm,
-          tds2: updated.tdsPpm,
-          temp: updated.temperature,
-          mode: updated.mode,
-          fan: updated.fan,
-          isOnline: updated.isOnline,
-          mobileCheckTime: mobileCheckNow,
-          backendReadingTime: updated.lastReadingTime,
-          rawBackendTs: match['ts']?.toString() ?? match['last_updated']?.toString(),
-        );
+        if (isStateChanged || shouldHeartbeat) {
+          _lastLoggedSignatures[updated.id] = signature;
+          _lastFullLogTime = mobileCheckNow;
+
+          AppLogger.telemetryReceived(
+            deviceId: updated.id,
+            tds1: updated.inletTdsPpm,
+            tds2: updated.tdsPpm,
+            temp: updated.temperature,
+            mode: updated.mode,
+            fan: updated.fan,
+            tdsRange: updated.tdsRange,
+            isOnline: updated.isOnline,
+            source: "🌐 LIVE CLOUD API",
+            mobileCheckTime: mobileCheckNow,
+            backendReadingTime: updated.lastReadingTime,
+            rawBackendTs: match['ts']?.toString() ?? match['last_updated']?.toString(),
+            isChanged: isStateChanged,
+          );
+        }
       } else {
         updatedList.add(dev);
       }
@@ -162,7 +209,7 @@ class TelemetryService {
       await DeviceStorageService.saveDevices(updatedList);
     }
 
-    return updatedList;
+    return List<DeviceModel>.from(updatedList);
   }
 
   /// Matches a DeviceModel against telemetry payloads using MAC address heuristics.
@@ -239,14 +286,6 @@ class TelemetryService {
     // Mode ('NF' or 'RO')
     final mode = r['mode']?.toString() ?? dev.mode;
 
-    // TDS range
-    final rawRange = r['tds_range'];
-    int? tdsRange;
-    if (rawRange != null) tdsRange = int.tryParse(rawRange.toString());
-
-    // Real Fan status directly from hardware telemetry record in DB
-    final fan = r['fan']?.toString() ?? dev.fan;
-
     // Timestamp
     final tsStr = r['ts']?.toString() ?? r['last_updated']?.toString();
     DateTime? readingTime;
@@ -274,6 +313,55 @@ class TelemetryService {
       if (parsed != null) {
         readingTime = parsed.isUtc ? parsed.toLocal() : parsed;
       }
+    }
+
+    final devIdClean = _cleanMac(dev.id);
+
+    // TDS range: DB verified response or local pending state
+    final pendingTdsTime = _pendingTdsCommandTimes[devIdClean];
+    final pendingTds = _pendingTdsRanges[devIdClean];
+    int? tdsRange;
+    if (pendingTdsTime != null && pendingTds != null) {
+      if (readingTime != null && readingTime.isAfter(pendingTdsTime)) {
+        // Hardware has responded and DB is updated!
+        final rawRange = r['tds_range'];
+        tdsRange = rawRange != null ? int.tryParse(rawRange.toString()) : pendingTds;
+        _pendingTdsCommandTimes.remove(devIdClean);
+        _pendingTdsRanges.remove(devIdClean);
+      } else if (DateTime.now().difference(pendingTdsTime).inSeconds < 45) {
+        // DB not updated yet -> preserve local optimistic state ("local pai ho rha hai hone do")
+        tdsRange = dev.tdsRange ?? pendingTds;
+      } else {
+        final rawRange = r['tds_range'];
+        tdsRange = rawRange != null ? int.tryParse(rawRange.toString()) : dev.tdsRange;
+        _pendingTdsCommandTimes.remove(devIdClean);
+        _pendingTdsRanges.remove(devIdClean);
+      }
+    } else {
+      final rawRange = r['tds_range'];
+      tdsRange = rawRange != null ? int.tryParse(rawRange.toString()) : dev.tdsRange;
+    }
+
+    // Fan status: DB verified response or local pending state
+    final pendingFanTime = _pendingFanCommandTimes[devIdClean];
+    final pendingFan = _pendingFanStates[devIdClean];
+    String? fan;
+    if (pendingFanTime != null && pendingFan != null) {
+      if (readingTime != null && readingTime.isAfter(pendingFanTime)) {
+        // Hardware has responded and DB is updated!
+        fan = r['fan']?.toString() ?? pendingFan;
+        _pendingFanCommandTimes.remove(devIdClean);
+        _pendingFanStates.remove(devIdClean);
+      } else if (DateTime.now().difference(pendingFanTime).inSeconds < 45) {
+        // DB not updated yet -> preserve local optimistic state ("local pai ho rha hai hone do")
+        fan = dev.fan ?? pendingFan;
+      } else {
+        fan = r['fan']?.toString() ?? dev.fan;
+        _pendingFanCommandTimes.remove(devIdClean);
+        _pendingFanStates.remove(devIdClean);
+      }
+    } else {
+      fan = r['fan']?.toString() ?? dev.fan;
     }
 
     return dev.copyWith(
@@ -318,7 +406,7 @@ class TelemetryService {
       targetHwId = cleanDevId.isNotEmpty ? cleanDevId : cleanSerial;
     }
 
-    final int effectiveTds = tdsRange > 990 ? 1000 : tdsRange;
+    final int effectiveTds = tdsRange >= 991 ? 1000 : tdsRange;
     final String effectiveFan = fanState.toLowerCase().trim() == 'disable' ? 'disable' : 'enable';
     final String command = rawCommand ?? (effectiveFan == 'disable' ? 'F,0' : (effectiveFan == 'enable' && rawCommand != null ? rawCommand : 'T,$effectiveTds'));
 
@@ -328,6 +416,19 @@ class TelemetryService {
       'fan': effectiveFan,
     };
     final subConfigJson = jsonEncode(subConfigMap);
+
+    // Record pending commanded states so local UI preserves them until DB updates with hardware response
+    final now = DateTime.now();
+    _pendingFanCommandTimes[cleanDevId] = now;
+    _pendingFanStates[cleanDevId] = effectiveFan;
+    _pendingTdsCommandTimes[cleanDevId] = now;
+    _pendingTdsRanges[cleanDevId] = effectiveTds;
+    if (targetHwId.isNotEmpty && targetHwId != cleanDevId) {
+      _pendingFanCommandTimes[targetHwId] = now;
+      _pendingFanStates[targetHwId] = effectiveFan;
+      _pendingTdsCommandTimes[targetHwId] = now;
+      _pendingTdsRanges[targetHwId] = effectiveTds;
+    }
 
     // ============================================================
     // PRIORITY 1: CLOUD MQTT DISPATCH (INTERNET HIGHEST PRIORITY)
@@ -345,7 +446,6 @@ class TelemetryService {
     for (int attempt = 1; attempt <= 2; attempt++) {
       HttpClient? client;
       try {
-        debugPrint('[Telemetry] [Priority #1] Attempting Cloud MQTT dispatch (Attempt $attempt/2)...');
         client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
 
         bool dispatched = false;
@@ -370,7 +470,6 @@ class TelemetryService {
 
             if (resp.statusCode >= 200 && resp.statusCode < 300) {
               dispatched = true;
-              debugPrint('[Telemetry] Successfully dispatched single SubConfig via $endpoint: $respBody');
               break;
             } else {
               lastCloudError = '$endpoint returned HTTP ${resp.statusCode}: $respBody';
@@ -389,10 +488,21 @@ class TelemetryService {
             mobileDispatchTime: DateTime.now(),
           );
 
+          String successMessage;
+          if (command == 'F,0' || (command.startsWith('F') && effectiveFan == 'disable')) {
+            successMessage = 'Disable command sent via Cloud';
+          } else if (command == 'F,1' || (command.startsWith('F') && effectiveFan == 'enable')) {
+            successMessage = 'Enable command sent via Cloud';
+          } else if (command.startsWith('T,')) {
+            successMessage = 'TDS command sent via Cloud';
+          } else {
+            successMessage = 'Command sent via Cloud';
+          }
+
           return CommandDispatchResult(
             success: true,
             transport: 'mqtt',
-            message: 'Command published via Internet (MQTT): $command',
+            message: successMessage,
           );
         }
       } on SocketException catch (se) {
@@ -439,17 +549,45 @@ class TelemetryService {
       command: command,
     );
 
-    // Also send JSON config over BLE characteristic
+    // Also send JSON config over BLE characteristic if connection succeeded
     try {
-      await ProvisioningService.instance.sendRawCommand(subConfigJson);
+      if (bleOk) {
+        await ProvisioningService.instance.sendRawCommand(subConfigJson);
+      }
     } catch (_) {}
+
+    if (!bleOk) {
+      _pendingFanCommandTimes.remove(cleanDevId);
+      _pendingFanStates.remove(cleanDevId);
+      _pendingTdsCommandTimes.remove(cleanDevId);
+      _pendingTdsRanges.remove(cleanDevId);
+      if (targetHwId.isNotEmpty) {
+        _pendingFanCommandTimes.remove(targetHwId);
+        _pendingFanStates.remove(targetHwId);
+        _pendingTdsCommandTimes.remove(targetHwId);
+        _pendingTdsRanges.remove(targetHwId);
+      }
+    }
+
+    String bleMessage;
+    if (bleOk) {
+      if (command == 'F,0' || (command.startsWith('F') && effectiveFan == 'disable')) {
+        bleMessage = 'Disable command sent via Bluetooth';
+      } else if (command == 'F,1' || (command.startsWith('F') && effectiveFan == 'enable')) {
+        bleMessage = 'Enable command sent via Bluetooth';
+      } else if (command.startsWith('T,')) {
+        bleMessage = 'TDS command sent via Bluetooth';
+      } else {
+        bleMessage = 'Command sent via Bluetooth';
+      }
+    } else {
+      bleMessage = 'Failed to deliver command via Bluetooth';
+    }
 
     return CommandDispatchResult(
       success: bleOk,
       transport: 'ble',
-      message: bleOk 
-        ? 'Internet offline: Command sent directly to purifier via Bluetooth!' 
-        : 'Failed to deliver command via Bluetooth',
+      message: bleMessage,
     );
   }
 
@@ -496,7 +634,7 @@ class TelemetryService {
       if (finalTds == null && command.startsWith('T,')) {
         finalTds = int.tryParse(command.substring(2).trim());
       }
-      if (finalTds != null && finalTds > 990) {
+      if (finalTds != null && finalTds >= 991) {
         finalTds = 1000;
       }
 

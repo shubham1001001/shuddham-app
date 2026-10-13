@@ -256,16 +256,46 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
     required String command,
     required String topic,
   }) {
-    final snappedNote = rawTds > 990.0 ? " (Rule Applied: Snapped to 1000 PPM because > 990)" : "";
+    final isSnapped = rawTds.round() >= 991;
     _printBlock('''
 ╔══════════════════════════════════════════════════════════════════
-║ 💧 [TDS COMMAND TRANSMITTED] • ${_timeNow()}
-║ 🎯 Device ID    : $deviceId
-║ 🎚️ Selected TDS : ${rawTds.toStringAsFixed(0)} PPM$snappedNote
-║ 💬 MQTT Command : "$command"
-║ 📮 Target Topic : $topic
-║ ✅ Dispatched via Cloud MQTT & Live Backend
+║ 📤 [TDS COMMAND DISPATCHED] • ${_timeNow()}
+║ 🎯 Device ID        : $deviceId
+║ 🎚️ Selected Slider   : ${rawTds.round()} PPM
+║ 💧 Passed To Device : $finalTds PPM ${isSnapped ? '(Rule applied: 991 or above -> 1000 PPM)' : ''}
+║ 📮 Target Topic     : $topic
+║ 📡 Transport        : Dispatched via AWS IoT Core MQTT
+║ ⏳ Note             : Awaiting hardware confirmation to update DB
 ╚══════════════════════════════════════════════════════════════════''');
+  }
+
+  static void tdsCommandResult({
+    required String deviceId,
+    required int targetTds,
+    required bool success,
+    required String transport,
+    required String message,
+  }) {
+    if (success) {
+      _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ ✅ [COMMAND DELIVERY CONFIRMED] • ${_timeNow()}
+║ 🎯 Device ID   : $deviceId
+║ 🎚️ Target TDS  : $targetTds PPM
+║ 📡 Route       : ${transport == 'ble' ? 'Bluetooth LE (Local)' : 'Cloud MQTT (AWS)'}
+║ ℹ️ Result      : $message
+╚══════════════════════════════════════════════════════════════════''');
+    } else {
+      _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ ❌ [COMMAND DELIVERY FAILED] • ${_timeNow()}
+║ 🎯 Device ID   : $deviceId
+║ 🎚️ Target TDS  : $targetTds PPM
+║ 📡 Route       : ${transport == 'ble' ? 'Bluetooth LE (Local)' : 'Cloud MQTT (AWS)'}
+║ 🔒 Setting     : KEPT UNCHANGED (Command not delivered)
+║ ⚠️ Reason      : $message
+╚══════════════════════════════════════════════════════════════════''');
+    }
   }
 
   static void internetPriorityMqttDispatched({
@@ -277,23 +307,15 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
     DateTime? backendLastReadingTime,
   }) {
     final dispatchTime = mobileDispatchTime ?? DateTime.now();
-    final backendDiff = backendLastReadingTime != null
-        ? ' (${timeDifferenceString(backendLastReadingTime, dispatchTime)})'
-        : '';
-    final backendTsFormatted = backendLastReadingTime != null
-        ? formatTimestamp(backendLastReadingTime)
-        : 'Live Snapshot';
 
     _printBlock('''
 ╔══════════════════════════════════════════════════════════════════
-║ 🌐 [INTERNET CONNECTED • PRIORITY #1 CLOUD MQTT] • ${_timeNow()}
-║ 🎯 Target Dev       : $deviceId
-║ 📮 Target Topic     : $topic
-║ 📦 JSON Payload     : ${jsonEncode(payload)}
-║ 💬 Hardware Cmd     : "$command"
-║ 📱 Mobile Dispatched: ${formatTimestamp(dispatchTime)} (Live)
-║ ☁️ Backend State Ts : $backendTsFormatted$backendDiff
-║ ✅ Status            : Dispatched to Cloud Backend -> Published to AWS IoT Core MQTT
+║ 🌐 [CONFIG DISPATCHED TO AWS IOT] • ${_timeNow()}
+║ 🎯 Device ID    : $deviceId
+║ 📮 MQTT Topic   : $topic
+║ 📦 Payload JSON : ${jsonEncode(payload)}
+║ ⏱️ Sent At      : ${formatTimestamp(dispatchTime)}
+║ ℹ️ Local State  : Stored optimistically (waiting for hardware DB update)
 ╚══════════════════════════════════════════════════════════════════''');
   }
 
@@ -317,10 +339,13 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
     required double? temp,
     required String? mode,
     required String? fan,
+    int? tdsRange,
     required bool isOnline,
+    String source = "🌐 LIVE CLOUD API",
     DateTime? mobileCheckTime,
     DateTime? backendReadingTime,
     String? rawBackendTs,
+    bool isChanged = false,
   }) {
     final checkTime = mobileCheckTime ?? DateTime.now();
     final diffStr = backendReadingTime != null 
@@ -330,16 +355,50 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
         ? formatTimestamp(backendReadingTime)
         : (rawBackendTs ?? '--');
 
+    final title = isChanged ? '⚡ [NEW HARDWARE TELEMETRY RECEIVED]' : '📊 [TELEMETRY STATE SYNC]';
+
     _printBlock('''
 ╔══════════════════════════════════════════════════════════════════
-║ 📊 [LIVE SENSOR TELEMETRY SYNC] • ${_timeNow()}
-║ 🆔 Device: $deviceId | Status: ${isOnline ? "🟢 ONLINE" : "🔴 OFFLINE"}
-║ 📱 Mobile Checked At  : ${formatTimestamp(checkTime)} (Just now)
-║ ☁️ Backend Hardware Ts: $backendFormatted ($diffStr)
-║ 💧 Outlet TDS: ${tds2 ?? tds1 ?? "--"} PPM | Inlet TDS: ${tds1 ?? "--"} PPM
-║ 🌡️ Temperature: ${temp != null ? "${temp.toStringAsFixed(1)}°C" : "--"}
-║ ⚙️ Mode: ${mode ?? "--"} | Fan: ${fan ?? "--"}
+║ $title • ${_timeNow()}
+║ 📍 Source             : $source
+║ 🆔 Device ID           : $deviceId (${isOnline ? "🟢 ONLINE" : "🔴 OFFLINE"})
+║ ⏱️ Hardware Reading Ts : $backendFormatted ($diffStr)
+║ 💧 Pure TDS (Outlet)   : ${tds2 ?? "--"} PPM
+║ 💧 Raw TDS (Inlet)     : ${tds1 ?? "--"} PPM
+║ 🎯 Target TDS Limit    : ${tdsRange != null ? "$tdsRange PPM" : "--"}
+║ 🌀 Cooling Fan Relay   : ${fan?.toUpperCase() ?? "--"}
+║ 🌡️ Water Temperature   : ${temp != null ? "${temp.toStringAsFixed(1)}°C" : "--"} | Mode: ${mode ?? "--"}
 ╚══════════════════════════════════════════════════════════════════''');
+  }
+
+  // ==========================================
+  // 7. DATA SOURCE TRACKING (API vs LOCAL STORAGE)
+  // ==========================================
+  static void dataSourceLoaded({
+    required String source,
+    required String dataType,
+    required int count,
+    String? storageKey,
+    String? endpoint,
+    String? details,
+  }) {
+    final icon = source.contains('API') || source.contains('CLOUD') ? '🌐' : '💾';
+    final buffer = StringBuffer();
+    buffer.writeln('╔══════════════════════════════════════════════════════════════════');
+    buffer.writeln('║ $icon [DATA SOURCE: $source] • ${_timeNow()}');
+    buffer.writeln('║ 📦 Data Type    : $dataType');
+    buffer.writeln('║ 🔢 Device Count : $count');
+    if (endpoint != null && endpoint.isNotEmpty) {
+      buffer.writeln('║ 🔗 API Endpoint : $endpoint');
+    }
+    if (storageKey != null && storageKey.isNotEmpty) {
+      buffer.writeln('║ 🔑 Storage Key  : $storageKey');
+    }
+    if (details != null && details.isNotEmpty) {
+      buffer.writeln('║ ℹ️ Source Info  : $details');
+    }
+    buffer.writeln('╚══════════════════════════════════════════════════════════════════');
+    _printBlock(buffer.toString());
   }
 
   // ==========================================
@@ -394,4 +453,38 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
 ║ 💥 Error Details: $error
 ╚══════════════════════════════════════════════════════════════════''');
   }
+
+  static void fanCommandResult({
+    required String deviceId,
+    required String command,
+    required String action,
+    required bool success,
+    required String transport,
+    required String message,
+    required String currentFanStatus,
+    String? newFanStatus,
+  }) {
+    if (success) {
+      _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ ✅ [FAN COMMAND SUCCESS] • ${_timeNow()}
+║ 🎯 Device ID   : $deviceId
+║ 🌀 Action      : $action
+║ 📡 Transport   : ${transport.toUpperCase()} (${transport == 'ble' ? 'Bluetooth LE' : 'Cloud MQTT'})
+║ ⚙️ Fan Status  : Updated to ${newFanStatus?.toUpperCase() ?? 'UPDATED'}
+║ ℹ️ Message     : $message
+╚══════════════════════════════════════════════════════════════════''');
+    } else {
+      _printBlock('''
+╔══════════════════════════════════════════════════════════════════
+║ ❌ [FAN COMMAND FAILED - STATUS NOT CHANGED] • ${_timeNow()}
+║ 🎯 Device ID   : $deviceId
+║ 🌀 Action      : $action
+║ 📡 Transport   : ${transport.toUpperCase()} (${transport == 'ble' ? 'Bluetooth LE' : 'Cloud MQTT'})
+║ 🔒 Fan Status  : KEPT UNCHANGED as "$currentFanStatus" (No state change applied)
+║ ⚠️ Failure     : $message
+╚══════════════════════════════════════════════════════════════════''');
+    }
+  }
 }
+

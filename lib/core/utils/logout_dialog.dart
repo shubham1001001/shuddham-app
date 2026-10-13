@@ -72,8 +72,8 @@ Future<void> showLogoutDialog(BuildContext context, {LogoutUseCase? logoutUseCas
               Navigator.of(dialogContext).pop();
               final currentToken = UserSession().token;
 
-              // Clear local devices and user session to completely prevent cross-account leakage
-              await DeviceStorageService.clearAllDevices();
+              // Clear user session & purge global device caches
+              await DeviceStorageService.onUserLogout();
               await UserSession().clear();
               if (!context.mounted) return;
               Navigator.of(context).pushAndRemoveUntil(

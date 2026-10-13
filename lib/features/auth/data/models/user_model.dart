@@ -11,13 +11,14 @@ class UserModel extends UserEntity {
   });
 
   factory UserModel.fromJson(Map<String, dynamic> json) {
+    final resolvedId = (json['id'] ?? json['_id'] ?? json['customerId'] ?? json['userId'] ?? '').toString();
     return UserModel(
-      id: json['id'] as String? ?? 'usr-${DateTime.now().millisecondsSinceEpoch}',
-      fullName: json['fullName'] as String? ?? 'Customer',
-      phone: json['phone'] as String? ?? '',
+      id: resolvedId.isNotEmpty ? resolvedId : 'usr-shuddham-customer',
+      fullName: json['fullName'] as String? ?? json['name'] as String? ?? 'Customer',
+      phone: (json['phone'] ?? json['phoneNumber'] ?? json['mobile'] ?? '').toString(),
       email: json['email'] as String?,
       city: json['city'] as String?,
-      token: json['token'] as String? ?? 'mock-jwt-token',
+      token: (json['token'] ?? 'mock-jwt-token').toString(),
     );
   }
 

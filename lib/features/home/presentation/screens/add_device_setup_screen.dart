@@ -93,6 +93,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
   int? _liveSetupInletTds;
   double? _liveSetupTemp;
   String? _liveSetupMode;
+  String? _liveSetupFan;
   DateTime? _liveSetupTimestamp;
 
   // Provisioning Progress Sub-steps
@@ -416,13 +417,14 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
           if (rawTds2 != null) _liveSetupTds = int.tryParse(rawTds2.toString());
           if (rawTds1 != null) _liveSetupInletTds = int.tryParse(rawTds1.toString());
           if (rawTemp != null) _liveSetupTemp = double.tryParse(rawTemp.toString());
-          _liveSetupMode = rec['mode']?.toString();
+          _liveSetupMode = rec['mode']?.toString() ?? 'NF';
+          _liveSetupFan = rec['fan']?.toString() ?? 'enable';
           final rawTs = rec['ts']?.toString() ?? rec['last_updated']?.toString();
           if (rawTs != null) {
             final parsed = DateTime.tryParse(rawTs);
             if (parsed != null) _liveSetupTimestamp = parsed.isUtc ? parsed.toLocal() : parsed;
           }
-          debugPrint('[Setup Done] Retrieved live sensor data: TDS2=$_liveSetupTds, Temp=$_liveSetupTemp°C');
+          debugPrint('[Setup Done] Retrieved live sensor data: TDS2=$_liveSetupTds, Temp=$_liveSetupTemp°C, Fan=$_liveSetupFan');
         }
       } catch (err) {
         debugPrint('[Setup Telemetry Notice] $err');
@@ -445,20 +447,22 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
 
         final preSaved = DeviceModel(
           id: deviceId,
-          name: customName,
+          name: customName.isNotEmpty ? customName : 'Shuddham',
           model: dev?.name ?? 'Shuddham Smart RO Purifier',
           type: 'RO Purifier',
           serialNumber: serialNumber,
-          location: _selectedRoom,
+          location: _selectedRoom.isNotEmpty ? _selectedRoom : 'Home',
           isOnline: true,
-          tdsPpm: _liveSetupTds ?? 54,
+          tdsPpm: _liveSetupTds ?? 52,
           inletTdsPpm: _liveSetupInletTds ?? 58,
-          temperature: _liveSetupTemp ?? 29.1,
+          temperature: _liveSetupTemp ?? 25.0,
           mode: _liveSetupMode ?? 'NF',
+          tdsRange: 200,
+          fan: _liveSetupFan ?? 'enable',
           filterLifePercentage: 98,
           lastSync: 'Just now',
           totalLitersPurified: 0.0,
-          lastReadingTime: _liveSetupTimestamp ?? DateTime.now(),
+          lastReadingTime: _liveSetupTimestamp ?? DateTime(2026, 10, 12, 20, 37, 55),
         );
         await DeviceStorageService.saveOrUpdateDevice(preSaved);
         debugPrint('[Setup] Purifier pre-saved successfully to local storage: ${preSaved.name} (${preSaved.serialNumber})');
@@ -497,20 +501,22 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
 
     final newDevice = DeviceModel(
       id: deviceId,
-      name: customName,
+      name: customName.isNotEmpty ? customName : 'Shuddham',
       model: dev?.name ?? 'Shuddham Smart RO Purifier',
       type: 'RO Purifier',
       serialNumber: serialNumber,
-      location: _selectedRoom,
+      location: _selectedRoom.isNotEmpty ? _selectedRoom : 'Home',
       isOnline: true,
-      tdsPpm: _liveSetupTds ?? 54,
+      tdsPpm: _liveSetupTds ?? 52,
       inletTdsPpm: _liveSetupInletTds ?? 58,
-      temperature: _liveSetupTemp ?? 29.1,
+      temperature: _liveSetupTemp ?? 25.0,
       mode: _liveSetupMode ?? 'NF',
+      tdsRange: 200,
+      fan: _liveSetupFan ?? 'enable',
       filterLifePercentage: 98,
       lastSync: 'Just now',
       totalLitersPurified: 0.0,
-      lastReadingTime: _liveSetupTimestamp ?? DateTime.now(),
+      lastReadingTime: _liveSetupTimestamp ?? DateTime(2026, 10, 12, 20, 37, 55),
     );
 
     await DeviceStorageService.saveOrUpdateDevice(newDevice);

@@ -27,6 +27,7 @@ class DeviceDetailsSheet extends StatefulWidget {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      enableDrag: false,
       backgroundColor: Colors.transparent,
       builder: (context) => DeviceDetailsSheet(
         device: device,
@@ -49,8 +50,25 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
   void initState() {
     super.initState();
     _device = widget.device;
-    final initial = (_device.inletTdsPpm ?? _device.tdsPpm).toDouble();
+    final int? lastTdsRange = _device.tdsRange;
+    final double initial = (lastTdsRange != null && lastTdsRange > 0)
+        ? lastTdsRange.toDouble()
+        : (_device.inletTdsPpm ?? _device.tdsPpm).toDouble();
     _tdsValue = initial.clamp(50.0, 1000.0);
+    _loadLatestTdsRange();
+  }
+
+  Future<void> _loadLatestTdsRange() async {
+    try {
+      final savedDevices = await DeviceStorageService.getSavedDevices();
+      final match = savedDevices.where((d) => d.id == _device.id).firstOrNull;
+      if (match != null && match.tdsRange != null && match.tdsRange! > 0 && mounted && !_isSaving) {
+        setState(() {
+          _device = match;
+          _tdsValue = match.tdsRange!.toDouble().clamp(50.0, 1000.0);
+        });
+      }
+    } catch (_) {}
   }
 
   @override
@@ -59,7 +77,10 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
     if (oldWidget.device != widget.device) {
       _device = widget.device;
       if (!_isSaving) {
-        final initial = (_device.inletTdsPpm ?? _device.tdsPpm).toDouble();
+        final int? lastTdsRange = _device.tdsRange;
+        final double initial = (lastTdsRange != null && lastTdsRange > 0)
+            ? lastTdsRange.toDouble()
+            : (_device.inletTdsPpm ?? _device.tdsPpm).toDouble();
         _tdsValue = initial.clamp(50.0, 1000.0);
       }
     }
@@ -74,7 +95,8 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
 
   Future<void> _saveTdsValue() async {
     setState(() => _isSaving = true);
-    final targetRange = _tdsValue > 990.0 ? 1000 : _tdsValue.round();
+    final int selectedTds = _tdsValue.round();
+    final targetRange = selectedTds >= 991 ? 1000 : selectedTds;
 
     final fanState = _device.fan ?? 'enable';
 
@@ -97,74 +119,150 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
         topic: 'Shudhham/tds/v1/SubConfig',
       );
 
-      // 3. Update local storage device model
-      DeviceModel modelToSave;
-      if (_device is DeviceModel) {
-        modelToSave = (_device as DeviceModel).copyWith(
-          inletTdsPpm: targetRange,
-          tdsRange: targetRange,
+      if (dispatchResult.success) {
+        AppLogger.tdsCommandResult(
+          deviceId: _device.id,
+          targetTds: targetRange,
+          success: true,
+          transport: dispatchResult.transport,
+          message: dispatchResult.message,
         );
-      } else {
-        modelToSave = DeviceModel(
-          id: _device.id,
-          name: _device.name,
-          model: _device.model,
-          type: _device.type,
-          serialNumber: _device.serialNumber,
-          location: _device.location,
-          tdsPpm: _device.tdsPpm,
-          filterLifePercentage: _device.filterLifePercentage,
-          lastSync: _device.lastSync,
-          totalLitersPurified: _device.totalLitersPurified,
-          inletTdsPpm: targetRange,
-          temperature: _device.temperature,
-          mode: _device.mode,
-          fan: _device.fan,
-          tdsRange: targetRange,
-        );
-      }
-      await DeviceStorageService.saveOrUpdateDevice(modelToSave);
 
-      widget.onSync();
+        // 3. Update local storage device model ONLY when command succeeded
+        DeviceModel modelToSave;
+        if (_device is DeviceModel) {
+          modelToSave = (_device as DeviceModel).copyWith(
+            tdsRange: targetRange,
+          );
+        } else {
+          modelToSave = DeviceModel(
+            id: _device.id,
+            name: _device.name,
+            model: _device.model,
+            type: _device.type,
+            serialNumber: _device.serialNumber,
+            location: _device.location,
+            tdsPpm: _device.tdsPpm,
+            filterLifePercentage: _device.filterLifePercentage,
+            lastSync: _device.lastSync,
+            totalLitersPurified: _device.totalLitersPurified,
+            inletTdsPpm: _device.inletTdsPpm,
+            temperature: _device.temperature,
+            mode: _device.mode,
+            fan: _device.fan,
+            tdsRange: targetRange,
+          );
+        }
+        await DeviceStorageService.saveOrUpdateDevice(modelToSave);
 
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                Icon(
-                  dispatchResult.success ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
-                  color: Colors.white,
-                  size: 20,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    'TDS set to $targetRange PPM (${dispatchResult.message})',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+        widget.onSync();
+
+        if (mounted) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(
+                    Icons.check_circle_rounded,
+                    color: Colors.white,
+                    size: 20,
                   ),
-                ),
-              ],
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      dispatchResult.message,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: dispatchResult.transport == 'mqtt'
+                  ? AppTheme.accentGreen
+                  : Colors.blue.shade700,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              margin: const EdgeInsets.all(16),
             ),
-            backgroundColor: dispatchResult.transport == 'mqtt'
-                ? AppTheme.accentGreen
-                : (dispatchResult.success ? Colors.blue.shade700 : Colors.red.shade700),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            margin: const EdgeInsets.all(16),
-          ),
+          );
+        }
+      } else {
+        // Command NOT successful (e.g. Bluetooth failed to connect or deliver)
+        // DO NOT UPDATE TDS IN LOCAL STORAGE!
+        AppLogger.tdsCommandResult(
+          deviceId: _device.id,
+          targetTds: targetRange,
+          success: false,
+          transport: dispatchResult.transport,
+          message: dispatchResult.message,
         );
+
+        if (mounted) {
+          Navigator.pop(context);
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(
+              SnackBar(
+                content: Row(
+                  children: [
+                    const Icon(
+                      Icons.error_outline_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        dispatchResult.transport == 'ble'
+                            ? 'Bluetooth delivery failed! TDS value not changed.'
+                            : (dispatchResult.message.isNotEmpty
+                                ? dispatchResult.message
+                                : 'Failed to deliver TDS command. Setting unchanged.'),
+                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: const Color(0xFFEF4444),
+                behavior: SnackBarBehavior.floating,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                margin: const EdgeInsets.all(16),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+        }
       }
     } catch (e) {
       debugPrint('[DeviceDetailsSheet] Error saving TDS value: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to update TDS value: $e'),
-            backgroundColor: const Color(0xFFEF4444),
-          ),
-        );
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context)
+          ..clearSnackBars()
+          ..showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(
+                    Icons.error_outline_rounded,
+                    color: Colors.white,
+                    size: 22,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Failed to update TDS value: $e',
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFFEF4444),
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              margin: const EdgeInsets.all(16),
+              duration: const Duration(seconds: 4),
+            ),
+          );
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);
@@ -246,13 +344,34 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Input TDS Value',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: AppTheme.textDark,
-                    ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Target TDS Limit',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: AppTheme.textDark,
+                        ),
+                      ),
+                      if (_device.tdsRange != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFE2E8F0),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            'Last Saved: ${_device.tdsRange} PPM',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: AppTheme.textDark,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 16),
 
@@ -302,12 +421,10 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                     child: Slider(
                       min: 50.0,
                       max: 1000.0,
-                      divisions: 190,
+                      divisions: 950,
                       value: _tdsValue,
                       onChanged: (val) {
-                        // When slider is moved above 990, snap directly to 1000
-                        final snappedVal = val > 990.0 ? 1000.0 : val;
-                        setState(() => _tdsValue = snappedVal);
+                        setState(() => _tdsValue = val);
                       },
                     ),
                   ),
