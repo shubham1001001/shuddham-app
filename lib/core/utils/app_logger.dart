@@ -339,7 +339,11 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
     required double? temp,
     required String? mode,
     required String? fan,
+    String? rawHardwareFan,
+    String? pendingExpectedFan,
     int? tdsRange,
+    int? rawHardwareTdsRange,
+    int? pendingExpectedTdsRange,
     required bool isOnline,
     String source = "🌐 LIVE CLOUD API",
     DateTime? mobileCheckTime,
@@ -357,6 +361,26 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
 
     final title = isChanged ? '⚡ [NEW HARDWARE TELEMETRY RECEIVED]' : '📊 [TELEMETRY STATE SYNC]';
 
+    final String fanLogLine;
+    if (pendingExpectedFan != null &&
+        pendingExpectedFan.toLowerCase().trim() != (rawHardwareFan ?? fan)?.toLowerCase().trim()) {
+      fanLogLine =
+          '║ 🌀 Real Last Fan Status: ${(rawHardwareFan ?? fan)?.toUpperCase() ?? "--"} (from Cloud DB)\n'
+          '║ ⏳ Expected Status     : ${pendingExpectedFan.toUpperCase()} (Awaiting Hardware Confirmation)';
+    } else {
+      fanLogLine = '║ 🌀 Cooling Fan Relay   : ${fan?.toUpperCase() ?? "--"}';
+    }
+
+    final String tdsRangeLogLine;
+    if (pendingExpectedTdsRange != null &&
+        pendingExpectedTdsRange != (rawHardwareTdsRange ?? tdsRange)) {
+      tdsRangeLogLine =
+          '║ 🎯 Real Target TDS     : ${rawHardwareTdsRange != null ? "$rawHardwareTdsRange PPM" : (tdsRange != null ? "$tdsRange PPM" : "--")} (from Cloud DB)\n'
+          '║ ⏳ Expected Target TDS : $pendingExpectedTdsRange PPM (Awaiting Hardware Confirmation)';
+    } else {
+      tdsRangeLogLine = '║ 🎯 Target TDS Limit    : ${tdsRange != null ? "$tdsRange PPM" : "--"}';
+    }
+
     _printBlock('''
 ╔══════════════════════════════════════════════════════════════════
 ║ $title • ${_timeNow()}
@@ -365,8 +389,8 @@ ${payload != null ? "║ 📦 Payload: ${jsonEncode(payload)}" : ""}
 ║ ⏱️ Hardware Reading Ts : $backendFormatted ($diffStr)
 ║ 💧 Pure TDS (Outlet)   : ${tds2 ?? "--"} PPM
 ║ 💧 Raw TDS (Inlet)     : ${tds1 ?? "--"} PPM
-║ 🎯 Target TDS Limit    : ${tdsRange != null ? "$tdsRange PPM" : "--"}
-║ 🌀 Cooling Fan Relay   : ${fan?.toUpperCase() ?? "--"}
+$tdsRangeLogLine
+$fanLogLine
 ║ 🌡️ Water Temperature   : ${temp != null ? "${temp.toStringAsFixed(1)}°C" : "--"} | Mode: ${mode ?? "--"}
 ╚══════════════════════════════════════════════════════════════════''');
   }

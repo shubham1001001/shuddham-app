@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../../../core/services/device_storage_service.dart';
 import '../../../../core/services/telemetry_service.dart';
 import '../../../../core/utils/app_logger.dart';
+import '../../../../core/utils/app_toast.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../data/models/device_model.dart';
 import '../../domain/entities/device_entity.dart';
@@ -95,9 +96,9 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
 
   Future<void> _saveTdsValue() async {
     setState(() => _isSaving = true);
+    final int? originalTds = _device.tdsRange;
     final int selectedTds = _tdsValue.round();
     final targetRange = selectedTds >= 991 ? 1000 : selectedTds;
-
     final fanState = _device.fan ?? 'enable';
 
     try {
@@ -119,16 +120,53 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
         topic: 'Shudhham/tds/v1/SubConfig',
       );
 
-      if (dispatchResult.success) {
+      if (!dispatchResult.success) {
+        // Dispatch failed (e.g. Bluetooth failed or network error)
         AppLogger.tdsCommandResult(
           deviceId: _device.id,
           targetTds: targetRange,
-          success: true,
+          success: false,
           transport: dispatchResult.transport,
           message: dispatchResult.message,
         );
 
-        // 3. Update local storage device model ONLY when command succeeded
+        TelemetryService.instance.clearPendingTds(_device.id);
+
+        if (mounted) {
+          final messenger = ScaffoldMessenger.of(context);
+          Navigator.pop(context);
+          AppToast.showFailure(
+            context,
+            messenger: messenger,
+            title: dispatchResult.transport == 'ble'
+                ? 'Bluetooth Delivery Failed'
+                : 'TDS Command Failed',
+            subtitle: dispatchResult.transport == 'ble'
+                ? 'Could not deliver TDS value over Bluetooth. Setting unchanged.'
+                : (dispatchResult.message.isNotEmpty
+                    ? dispatchResult.message
+                    : 'Failed to deliver TDS command. Setting unchanged.'),
+            transport: dispatchResult.transport,
+          );
+        }
+        return;
+      }
+
+      // If sent via BLE, hardware executes immediately
+      bool hardwareConfirmed = (dispatchResult.transport == 'ble');
+
+      if (!hardwareConfirmed) {
+        // Wait briefly (up to 10s) for immediate hardware confirmation
+        hardwareConfirmed = await TelemetryService.instance.waitForHardwareConfirmation(
+          deviceId: _device.id,
+          expectedTdsRange: targetRange,
+          timeout: const Duration(seconds: 10),
+          pollInterval: const Duration(seconds: 3),
+        );
+      }
+
+      if (hardwareConfirmed) {
+        // Hardware confirmed! Update local storage device model
         DeviceModel modelToSave;
         if (_device is DeviceModel) {
           modelToSave = (_device as DeviceModel).copyWith(
@@ -158,79 +196,42 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
         widget.onSync();
 
         if (mounted) {
+          final messenger = ScaffoldMessenger.of(context);
           Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  const Icon(
-                    Icons.check_circle_rounded,
-                    color: Colors.white,
-                    size: 20,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      dispatchResult.message,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ],
-              ),
-              backgroundColor: dispatchResult.transport == 'mqtt'
-                  ? AppTheme.accentGreen
-                  : Colors.blue.shade700,
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              margin: const EdgeInsets.all(16),
-            ),
+          AppToast.showSuccess(
+            context,
+            messenger: messenger,
+            title: dispatchResult.transport == 'ble'
+                ? 'Target TDS Updated'
+                : 'Target TDS Confirmed',
+            subtitle: dispatchResult.transport == 'ble'
+                ? 'Target TDS limit set to $targetRange PPM via Bluetooth!'
+                : 'Target TDS limit set to $targetRange PPM via Cloud Wi-Fi!',
+            transport: dispatchResult.transport,
           );
         }
       } else {
-        // Command NOT successful (e.g. Bluetooth failed to connect or deliver)
-        // DO NOT UPDATE TDS IN LOCAL STORAGE!
-        AppLogger.tdsCommandResult(
-          deviceId: _device.id,
-          targetTds: targetRange,
-          success: false,
-          transport: dispatchResult.transport,
-          message: dispatchResult.message,
-        );
+        // Hardware did NOT confirm: REVERT TO OG (ORIGINAL) VALUE!
+        TelemetryService.instance.clearPendingTds(_device.id);
 
         if (mounted) {
+          setState(() {
+            if (originalTds != null && originalTds > 0) {
+              _tdsValue = originalTds.toDouble().clamp(50.0, 1000.0);
+            }
+          });
+
+          final messenger = ScaffoldMessenger.of(context);
           Navigator.pop(context);
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(
-                      Icons.error_outline_rounded,
-                      color: Colors.white,
-                      size: 22,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        dispatchResult.transport == 'ble'
-                            ? 'Bluetooth delivery failed! TDS value not changed.'
-                            : (dispatchResult.message.isNotEmpty
-                                ? dispatchResult.message
-                                : 'Failed to deliver TDS command. Setting unchanged.'),
-                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: const Color(0xFFEF4444),
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                margin: const EdgeInsets.all(16),
-                duration: const Duration(seconds: 4),
-              ),
-            );
+          AppToast.showHardwareTimeout(
+            context,
+            messenger: messenger,
+            title: 'Purifier Did Not Respond',
+            subtitle: 'Target TDS reverted to original (${originalTds ?? 1000} PPM). Purifier is offline.',
+          );
         }
+
+        widget.onSync();
       }
     } catch (e) {
       debugPrint('[DeviceDetailsSheet] Error saving TDS value: $e');
@@ -475,13 +476,27 @@ class _DeviceDetailsSheetState extends State<DeviceDetailsSheet> {
                   ),
                 ),
                 child: _isSaving
-                    ? const SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator(
-                          color: Colors.white,
-                          strokeWidth: 2.5,
-                        ),
+                    ? Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2,
+                            ),
+                          ),
+                          SizedBox(width: 10),
+                          Text(
+                            'Verifying with Purifier...',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ],
                       )
                     : const Text(
                         'Set Input TDS Value',

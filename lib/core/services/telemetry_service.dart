@@ -37,6 +37,18 @@ class TelemetryService {
   static final Map<String, DateTime> _pendingTdsCommandTimes = {};
   static final Map<String, int> _pendingTdsRanges = {};
 
+  void clearPendingTds(String deviceId) {
+    final clean = _cleanMac(deviceId);
+    _pendingTdsCommandTimes.remove(clean);
+    _pendingTdsRanges.remove(clean);
+  }
+
+  void clearPendingFan(String deviceId) {
+    final clean = _cleanMac(deviceId);
+    _pendingFanCommandTimes.remove(clean);
+    _pendingFanStates.remove(clean);
+  }
+
   /// Fetches latest telemetry records for all purifiers from the cloud.
   Future<List<Map<String, dynamic>>> fetchAllTelemetry() async {
     HttpClient? client;
@@ -184,6 +196,12 @@ class TelemetryService {
           _lastLoggedSignatures[updated.id] = signature;
           _lastFullLogTime = mobileCheckNow;
 
+          final devIdClean = _cleanMac(dev.id);
+          final rawDbFan = match['fan']?.toString();
+          final rawDbTdsRange = match['tds_range'] != null ? int.tryParse(match['tds_range'].toString()) : null;
+          final pendingFan = _pendingFanStates[devIdClean];
+          final pendingTds = _pendingTdsRanges[devIdClean];
+
           AppLogger.telemetryReceived(
             deviceId: updated.id,
             tds1: updated.inletTdsPpm,
@@ -191,7 +209,11 @@ class TelemetryService {
             temp: updated.temperature,
             mode: updated.mode,
             fan: updated.fan,
+            rawHardwareFan: rawDbFan,
+            pendingExpectedFan: pendingFan,
             tdsRange: updated.tdsRange,
+            rawHardwareTdsRange: rawDbTdsRange,
+            pendingExpectedTdsRange: pendingTds,
             isOnline: updated.isOnline,
             source: "🌐 LIVE CLOUD API",
             mobileCheckTime: mobileCheckNow,
@@ -210,6 +232,65 @@ class TelemetryService {
     }
 
     return List<DeviceModel>.from(updatedList);
+  }
+
+  /// Actively polls the IoT backend to check if the purifier hardware has reported
+  /// the expected state (e.g. fanState or tdsRange) following a command.
+  /// Returns `true` if hardware confirms within [timeout] (default 150s for ESP32's ~2min cycle), or `false` on timeout.
+  Future<bool> waitForHardwareConfirmation({
+    required String deviceId,
+    String? expectedFan,
+    int? expectedTdsRange,
+    Duration timeout = const Duration(seconds: 30), // Snappy timeout for responsive UI
+    Duration pollInterval = const Duration(seconds: 6),
+  }) async {
+    final cleanDevId = _cleanMac(deviceId);
+    final startTime = DateTime.now();
+
+    while (DateTime.now().difference(startTime) < timeout) {
+      await Future.delayed(pollInterval);
+      try {
+        final records = await fetchAllTelemetry();
+        for (final r in records) {
+          final rId = _cleanMac(r['dev_Id'] ?? r['dev_id'] ?? r['devId'] ?? '');
+          final matches = rId == cleanDevId ||
+              (rId.length >= 10 && cleanDevId.length >= 10 && rId.substring(0, 10) == cleanDevId.substring(0, 10));
+
+          if (matches) {
+            bool fanMatches = true;
+            if (expectedFan != null) {
+              final actualFan = (r['fan']?.toString() ?? '').toLowerCase().trim();
+              fanMatches = (actualFan == expectedFan.toLowerCase().trim());
+            }
+
+            bool tdsMatches = true;
+            if (expectedTdsRange != null) {
+              final actualTds = int.tryParse(r['tds_range']?.toString() ?? '');
+              tdsMatches = (actualTds == expectedTdsRange);
+            }
+
+            if (fanMatches && tdsMatches) {
+              _pendingFanCommandTimes.remove(cleanDevId);
+              _pendingFanStates.remove(cleanDevId);
+              _pendingTdsCommandTimes.remove(cleanDevId);
+              _pendingTdsRanges.remove(cleanDevId);
+              debugPrint('✅ [Hardware Verified] $cleanDevId confirmed state: fan=$expectedFan, tds=$expectedTdsRange');
+              return true;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[Telemetry] Hardware polling check error: $e');
+      }
+    }
+
+    // Timed out: hardware did not confirm in time
+    _pendingFanCommandTimes.remove(cleanDevId);
+    _pendingFanStates.remove(cleanDevId);
+    _pendingTdsCommandTimes.remove(cleanDevId);
+    _pendingTdsRanges.remove(cleanDevId);
+    debugPrint('⏱️ [Hardware Timeout] $cleanDevId did not confirm within ${timeout.inSeconds}s');
+    return false;
   }
 
   /// Matches a DeviceModel against telemetry payloads using MAC address heuristics.
@@ -279,10 +360,6 @@ class TelemetryService {
       temp = double.tryParse(rawTemp.toString());
     }
 
-    // Online status
-    final statusStr = (r['status']?.toString() ?? 'online').toLowerCase();
-    final isOnline = statusStr == 'online';
-
     // Mode ('NF' or 'RO')
     final mode = r['mode']?.toString() ?? dev.mode;
 
@@ -315,6 +392,19 @@ class TelemetryService {
       }
     }
 
+    // Online status:
+    // 1. Explicit status string from backend/LWT ('offline' -> false)
+    // 2. Staleness check: ESP32 sends telemetry every ~2 minutes.
+    //    If last packet is older than 5 minutes, mark offline.
+    final statusStr = (r['status']?.toString() ?? 'online').toLowerCase();
+    bool isOnline = statusStr == 'online';
+    if (isOnline && readingTime != null) {
+      final stalenessMinutes = DateTime.now().difference(readingTime).inMinutes;
+      if (stalenessMinutes >= 5) {
+        isOnline = false;
+      }
+    }
+
     final devIdClean = _cleanMac(dev.id);
 
     // TDS range: DB verified response or local pending state
@@ -328,8 +418,8 @@ class TelemetryService {
         tdsRange = rawRange != null ? int.tryParse(rawRange.toString()) : pendingTds;
         _pendingTdsCommandTimes.remove(devIdClean);
         _pendingTdsRanges.remove(devIdClean);
-      } else if (DateTime.now().difference(pendingTdsTime).inSeconds < 45) {
-        // DB not updated yet -> preserve local optimistic state ("local pai ho rha hai hone do")
+      } else if (DateTime.now().difference(pendingTdsTime).inSeconds < 180) {
+        // Awaiting hardware verification — hold for up to 3 minutes for ESP32's ~2 min cycle
         tdsRange = dev.tdsRange ?? pendingTds;
       } else {
         final rawRange = r['tds_range'];
@@ -352,8 +442,8 @@ class TelemetryService {
         fan = r['fan']?.toString() ?? pendingFan;
         _pendingFanCommandTimes.remove(devIdClean);
         _pendingFanStates.remove(devIdClean);
-      } else if (DateTime.now().difference(pendingFanTime).inSeconds < 45) {
-        // DB not updated yet -> preserve local optimistic state ("local pai ho rha hai hone do")
+      } else if (DateTime.now().difference(pendingFanTime).inSeconds < 180) {
+        // Awaiting hardware verification — hold for up to 3 minutes for ESP32's ~2 min cycle
         fan = dev.fan ?? pendingFan;
       } else {
         fan = r['fan']?.toString() ?? dev.fan;

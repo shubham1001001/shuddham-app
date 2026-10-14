@@ -453,16 +453,16 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
           serialNumber: serialNumber,
           location: _selectedRoom.isNotEmpty ? _selectedRoom : 'Home',
           isOnline: true,
-          tdsPpm: _liveSetupTds ?? 52,
-          inletTdsPpm: _liveSetupInletTds ?? 58,
-          temperature: _liveSetupTemp ?? 25.0,
+          tdsPpm: _liveSetupTds ?? 0,
+          inletTdsPpm: _liveSetupInletTds,
+          temperature: _liveSetupTemp,
           mode: _liveSetupMode ?? 'NF',
           tdsRange: 200,
           fan: _liveSetupFan ?? 'enable',
-          filterLifePercentage: 98,
+          filterLifePercentage: 100,
           lastSync: 'Just now',
           totalLitersPurified: 0.0,
-          lastReadingTime: _liveSetupTimestamp ?? DateTime(2026, 10, 12, 20, 37, 55),
+          lastReadingTime: _liveSetupTimestamp,
         );
         await DeviceStorageService.saveOrUpdateDevice(preSaved);
         debugPrint('[Setup] Purifier pre-saved successfully to local storage: ${preSaved.name} (${preSaved.serialNumber})');
@@ -507,16 +507,16 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
       serialNumber: serialNumber,
       location: _selectedRoom.isNotEmpty ? _selectedRoom : 'Home',
       isOnline: true,
-      tdsPpm: _liveSetupTds ?? 52,
-      inletTdsPpm: _liveSetupInletTds ?? 58,
-      temperature: _liveSetupTemp ?? 25.0,
+      tdsPpm: _liveSetupTds ?? 0,
+      inletTdsPpm: _liveSetupInletTds,
+      temperature: _liveSetupTemp,
       mode: _liveSetupMode ?? 'NF',
       tdsRange: 200,
       fan: _liveSetupFan ?? 'enable',
-      filterLifePercentage: 98,
+      filterLifePercentage: 100,
       lastSync: 'Just now',
       totalLitersPurified: 0.0,
-      lastReadingTime: _liveSetupTimestamp ?? DateTime(2026, 10, 12, 20, 37, 55),
+      lastReadingTime: _liveSetupTimestamp,
     );
 
     await DeviceStorageService.saveOrUpdateDevice(newDevice);
@@ -1806,7 +1806,7 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              '${_liveSetupInletTds ?? 58} PPM',
+                              _liveSetupInletTds != null ? '$_liveSetupInletTds PPM' : '—',
                               style: const TextStyle(
                                 fontSize: 18,
                                 fontWeight: FontWeight.w800,

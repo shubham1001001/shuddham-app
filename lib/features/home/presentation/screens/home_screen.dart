@@ -13,6 +13,8 @@ import '../widgets/water_drop_illustration.dart';
 import '../widgets/device_card.dart';
 import '../widgets/add_device_card.dart';
 import '../widgets/device_details_sheet.dart';
+import '../widgets/home_shimmer_card.dart';
+import '../../../../core/utils/app_toast.dart';
 import 'add_device_setup_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -106,7 +108,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _selectedDeviceIndex = _devices.isNotEmpty
             ? _selectedDeviceIndex.clamp(0, _devices.length - 1)
             : 0;
-        _isLoading = false;
+        // If we have saved devices from cache, turn off loading immediately for zero-lag display.
+        // If empty (e.g. fresh login), keep _isLoading = true so the Shimmer card stays visible while cloud is checked!
+        if (_devices.isNotEmpty) {
+          _isLoading = false;
+        }
       });
     }
 
@@ -147,7 +153,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   fan: cloudDev.fan ?? existing.fan,
                   tdsRange: cloudDev.tdsRange ?? existing.tdsRange,
                   lastReadingTime: cloudDev.lastReadingTime ?? existing.lastReadingTime,
-                  isOnline: cloudDev.isOnline || existing.isOnline,
+                  isOnline: cloudDev.isOnline,
                 );
               }
               return cloudDev;
@@ -246,6 +252,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   bool _isSendingFanCommand = false;
+  String? _syncingFanDeviceId;
 
   Future<void> _sendFanCommand(DeviceModel device, String command) async {
     final isEnable = command.trim() == 'F,1';
@@ -310,11 +317,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
 
     final actionName = isEnable ? 'Enable Fan' : 'Disable Fan';
+    final fanState = isEnable ? 'enable' : 'disable';
+    final previousFan = device.fan;
 
-    setState(() => _isSendingFanCommand = true);
+    // 1. Optimistic UI update: show target state immediately with a 'Syncing' indicator
+    setState(() {
+      _isSendingFanCommand = true;
+      _syncingFanDeviceId = device.id;
+      final idx = _devices.indexWhere((d) => d.id == device.id);
+      if (idx != -1) {
+        _devices[idx] = device.copyWith(fan: fanState);
+      }
+    });
 
     try {
-      final fanState = isEnable ? 'enable' : 'disable';
       final dispatchResult = await TelemetryService.instance.sendSmartConfig(
         deviceId: device.id,
         serialNumber: device.serialNumber,
@@ -323,18 +339,66 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         rawCommand: command,
       );
 
-      if (dispatchResult.success) {
-        // ONLY update UI and local storage when command dispatch was successful
-        final updatedDevice = device.copyWith(fan: fanState);
+      if (!dispatchResult.success) {
+        // Dispatch failed (e.g. offline and bluetooth failed): REVERT UI!
         if (mounted) {
           setState(() {
             final idx = _devices.indexWhere((d) => d.id == device.id);
             if (idx != -1) {
-              _devices[idx] = updatedDevice;
+              _devices[idx] = device.copyWith(fan: previousFan);
             }
           });
+          AppToast.showFailure(
+            context,
+            title: dispatchResult.transport == 'ble'
+                ? 'Bluetooth Delivery Failed'
+                : 'Command Failed',
+            subtitle: dispatchResult.message.isNotEmpty
+                ? dispatchResult.message
+                : 'Failed to send fan command. Status unchanged.',
+            transport: dispatchResult.transport,
+          );
         }
-        await DeviceStorageService.saveOrUpdateDevice(updatedDevice);
+        return;
+      }
+
+      // If sent via BLE, hardware executes immediately
+      bool hardwareConfirmed = (dispatchResult.transport == 'ble');
+
+      if (!hardwareConfirmed) {
+        // Wait briefly (up to 10s) for immediate hardware confirmation
+        hardwareConfirmed = await TelemetryService.instance.waitForHardwareConfirmation(
+          deviceId: device.id,
+          expectedFan: fanState,
+          timeout: const Duration(seconds: 10),
+          pollInterval: const Duration(seconds: 3),
+        );
+      }
+
+      if (hardwareConfirmed) {
+        // HARDWARE CONFIRMED IMMEDIATELY!
+        final confirmedDevice = device.copyWith(fan: fanState);
+        await DeviceStorageService.saveOrUpdateDevice(confirmedDevice);
+
+        if (mounted) {
+          setState(() {
+            final idx = _devices.indexWhere((d) => d.id == device.id);
+            if (idx != -1) {
+              _devices[idx] = confirmedDevice;
+            }
+          });
+
+          AppToast.showSuccess(
+            context,
+            title: dispatchResult.transport == 'ble'
+                ? 'Purifier Updated'
+                : 'Hardware Confirmed',
+            subtitle: dispatchResult.transport == 'ble'
+                ? 'Cooling fan is now ${fanState.toUpperCase()}! Delivered via Bluetooth.'
+                : 'Cooling fan is now ${fanState.toUpperCase()}! Confirmed via Wi-Fi.',
+            transport: dispatchResult.transport,
+          );
+        }
 
         AppLogger.fanCommandResult(
           deviceId: device.id,
@@ -342,110 +406,61 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           action: actionName,
           success: true,
           transport: dispatchResult.transport,
-          message: dispatchResult.message,
-          currentFanStatus: device.fan ?? 'unknown',
+          message: 'Hardware confirmed fan state $fanState',
+          currentFanStatus: previousFan ?? 'unknown',
           newFanStatus: fanState,
         );
+      } else {
+        // Hardware did NOT confirm: REVERT TO PREVIOUS STATE!
+        TelemetryService.instance.clearPendingFan(device.id);
 
-        // Command sent successfully, show feedback
         if (mounted) {
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(
-                      Icons.check_circle_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        dispatchResult.message,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: dispatchResult.transport == 'mqtt' 
-                    ? AppTheme.accentGreen 
-                    : Colors.blue.shade700,
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                margin: const EdgeInsets.all(16),
-                duration: const Duration(seconds: 3),
-              ),
-            );
+          setState(() {
+            final idx = _devices.indexWhere((d) => d.id == device.id);
+            if (idx != -1) {
+              _devices[idx] = device.copyWith(fan: previousFan);
+            }
+          });
+
+          AppToast.showHardwareTimeout(
+            context,
+            title: 'Purifier Did Not Respond',
+            subtitle: 'Fan setting reverted. Purifier is offline.',
+          );
         }
 
-        // Sync fresh telemetry from server after brief pause
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted) _syncTelemetry();
-        });
-      } else {
-        // Command NOT successful (e.g. Bluetooth failed to connect or deliver)
-        // DO NOT UPDATE FAN STATUS IN UI OR STORAGE!
         AppLogger.fanCommandResult(
           deviceId: device.id,
           command: command,
           action: actionName,
           success: false,
           transport: dispatchResult.transport,
-          message: dispatchResult.message,
-          currentFanStatus: device.fan ?? 'unknown',
+          message: 'Hardware did not confirm within timeout. Reverted to $previousFan.',
+          currentFanStatus: previousFan ?? 'unknown',
         );
-
-        if (mounted) {
-          ScaffoldMessenger.of(context)
-            ..clearSnackBars()
-            ..showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(
-                      Icons.error_outline_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        dispatchResult.transport == 'ble'
-                            ? 'Bluetooth delivery failed! Fan status not changed.'
-                            : (dispatchResult.message.isNotEmpty
-                                ? dispatchResult.message
-                                : 'Failed to send fan command. Status unchanged.'),
-                        style: const TextStyle(fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: const Color(0xFFEF4444),
-                behavior: SnackBarBehavior.floating,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                margin: const EdgeInsets.all(16),
-                duration: const Duration(seconds: 4),
-              ),
-            );
-        }
       }
     } catch (e) {
+      // Exception: Revert UI
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to send $actionName: $e'),
-            backgroundColor: const Color(0xFFEF4444),
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            margin: const EdgeInsets.all(16),
-          ),
+        setState(() {
+          final idx = _devices.indexWhere((d) => d.id == device.id);
+          if (idx != -1) {
+            _devices[idx] = device.copyWith(fan: previousFan);
+          }
+        });
+        AppToast.showFailure(
+          context,
+          title: 'Command Failed',
+          subtitle: 'Failed to execute $actionName: $e',
+          transport: 'ble',
         );
       }
     } finally {
       if (mounted) {
-        setState(() => _isSendingFanCommand = false);
+        setState(() {
+          _isSendingFanCommand = false;
+          _syncingFanDeviceId = null;
+        });
       }
     }
   }
@@ -608,21 +623,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           });
         }
         await _syncTelemetry();
-        if (mounted) {
-          final current = _devices.isNotEmpty && index < _devices.length ? _devices[index] : device;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Updated hardware details for ${current.name}: TDS ${current.tdsPpm} PPM'
-                '${current.temperature != null ? ', ${current.temperature!.toStringAsFixed(1)}°C' : ''}!',
-              ),
-              backgroundColor: AppTheme.royalBlue,
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-              margin: const EdgeInsets.all(16),
-            ),
-          );
-        }
       },
     );
   }
@@ -633,81 +633,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       backgroundColor: const Color(0xFFF8FAFC),
       body: SafeArea(
         child: _isLoading && _devices.isEmpty
-            ? _buildLoadingScreen()
+            ? const HomeShimmerCard()
             : (_devices.isEmpty
                 ? _buildNoPurifierScreen()
                 : _buildConnectedPurifierScreen()),
       ),
     );
-  }
-
-  /// Dedicated loading screen shown while fetching purifiers from cloud
-  Widget _buildLoadingScreen() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildTopHeader(isConnected: false),
-        Expanded(
-          child: Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 90,
-                    height: 90,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: AppTheme.royalBlue.withValues(alpha: 0.08),
-                    ),
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        SizedBox(
-                          width: 82,
-                          height: 82,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 3.5,
-                            color: AppTheme.royalBlue,
-                            backgroundColor: AppTheme.royalBlue.withValues(alpha: 0.15),
-                          ),
-                        ),
-                        const Icon(
-                          Icons.water_drop_rounded,
-                          size: 38,
-                          color: AppTheme.royalBlue,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 28),
-                  const Text(
-                    'Loading Purifier...',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF102A43),
-                      letterSpacing: -0.3,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Connecting to Shuddham Cloud & checking your assigned devices...',
-                    style: TextStyle(
-                      fontSize: 13.5,
-                      color: Color(0xFF627D98),
-                      height: 1.4,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-    ],
-  );
   }
 
   /// 1. Screen matching the user's reference image
@@ -1011,7 +942,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 const Text('Inlet TDS', style: TextStyle(fontSize: 10, color: AppTheme.textMuted)),
                                 const SizedBox(height: 4),
                                 Text(
-                                  '${activeDevice.inletTdsPpm ?? 58} PPM',
+                                  activeDevice.inletTdsPpm != null ? '${activeDevice.inletTdsPpm} PPM' : '—',
                                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppTheme.textDark),
                                 ),
                                 const Text('Raw Water', style: TextStyle(fontSize: 9.5, color: AppTheme.textMuted, fontWeight: FontWeight.w600)),
@@ -1206,7 +1137,39 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                       ),
                                     ],
                                   ),
-                                  if (_isSendingFanCommand)
+                                  if (_syncingFanDeviceId == activeDevice.id)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFFEF3C7),
+                                        borderRadius: BorderRadius.circular(20),
+                                        border: Border.all(color: const Color(0xFFFDE68A)),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: const [
+                                          SizedBox(
+                                            width: 10,
+                                            height: 10,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 1.5,
+                                              color: Color(0xFFD97706),
+                                            ),
+                                          ),
+                                          SizedBox(width: 5),
+                                          Text(
+                                            'SYNCING',
+                                            style: TextStyle(
+                                              fontSize: 9.5,
+                                              fontWeight: FontWeight.w800,
+                                              letterSpacing: 0.5,
+                                              color: Color(0xFFB45309),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    )
+                                  else if (_isSendingFanCommand)
                                     const SizedBox(
                                       width: 18,
                                       height: 18,

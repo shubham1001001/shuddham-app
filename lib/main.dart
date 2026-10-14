@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'core/theme/app_theme.dart';
 import 'core/utils/app_logger.dart';
@@ -11,6 +12,9 @@ import 'core/session/user_session.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
   await UserSession().loadSession();
 
   // Monitor phone Bluetooth adapter state globally
