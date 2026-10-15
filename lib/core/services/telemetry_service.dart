@@ -529,7 +529,6 @@ class TelemetryService {
     // Direct Cloud MQTT Attempt (Up to 2 attempts before falling back to Bluetooth)
     final candidateEndpoints = [
       '${ApiEndpoints.liveBaseUrl}/telemetry/publish',
-      'http://192.168.1.50:4000/api/telemetry/publish',
       '${ApiEndpoints.liveBaseUrl}/telemetry/tds',
     ];
 
