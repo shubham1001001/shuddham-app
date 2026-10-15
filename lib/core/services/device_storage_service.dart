@@ -11,23 +11,6 @@ class DeviceStorageService {
   static const String _legacyKey = 'shuddham_paired_devices_v1';
   static const String _globalCacheKey = 'shuddham_paired_devices_cache_global';
 
-  /// Default baseline paired purifier device model with verified last real hardware readings.
-  static DeviceModel get defaultPurifier => DeviceModel(
-    id: '2805a520c400',
-    name: 'Shuddham',
-    model: 'Shuddham Smart RO Purifier',
-    type: 'RO Purifier',
-    serialNumber: 'SH-2805A520C400',
-    location: 'Home',
-    isOnline: true,
-    tdsPpm: 52,
-    inletTdsPpm: 58,
-    temperature: 25.0,
-    mode: 'NF',
-    tdsRange: 200,
-    fan: 'enable',
-    lastReadingTime: DateTime(2026, 10, 12, 20, 37, 55),
-  );
 
   /// Helper to decode SharedPreferences entries whether saved as StringList or raw JSON string
   static List<String>? _getStringListOrJson(SharedPreferences prefs, String key) {

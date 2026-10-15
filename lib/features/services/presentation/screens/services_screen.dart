@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../../../core/constants/api_endpoints.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/app_logger.dart';
 import '../../../../core/utils/app_toast.dart';
@@ -112,7 +113,7 @@ class _ServicesScreenState extends State<ServicesScreen> {
           source: liveList.isNotEmpty ? "🌐 LIVE CLOUD REST API" : "💾 LOCAL DEFAULT SERVICES",
           dataType: "Water Solution Services Catalog",
           count: _services.length,
-          endpoint: "http://3.88.13.76:4000/api/services",
+          endpoint: "${ApiEndpoints.baseUrl}${ApiEndpoints.services}",
           details: "Fetched ${liveList.length} live services catalog from cloud backend.",
         );
       }

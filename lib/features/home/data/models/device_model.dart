@@ -65,16 +65,16 @@ class DeviceModel extends DeviceEntity {
       return double.tryParse(val.toString());
     }
 
-    final rawId = (json['id'] ?? json['dev_id'] ?? json['devId'] ?? json['deviceId'] ?? json['serialNumber'] ?? '2805a520c400').toString();
+    final rawId = (json['id'] ?? json['dev_id'] ?? json['devId'] ?? json['deviceId'] ?? json['serialNumber'] ?? '').toString();
     final rawName = (json['name'] ?? json['deviceName'] ?? 'Shuddham').toString();
     final rawSerial = (json['serialNumber'] ?? json['serial_number'] ?? rawId).toString();
 
     return DeviceModel(
-      id: rawId.isNotEmpty ? rawId : '2805a520c400',
+      id: rawId.isNotEmpty ? rawId : (rawSerial.isNotEmpty ? rawSerial : 'device_${DateTime.now().millisecondsSinceEpoch}'),
       name: rawName.isNotEmpty ? rawName : 'Shuddham',
       model: json['model'] as String? ?? 'Shuddham Smart RO Purifier',
       type: json['type'] as String? ?? 'RO Purifier',
-      serialNumber: rawSerial.isNotEmpty ? rawSerial : 'SH-2805A520C400',
+      serialNumber: rawSerial.isNotEmpty ? rawSerial : (rawId.isNotEmpty ? 'SH-$rawId' : 'SH-DEVICE'),
       location: json['location'] as String? ?? 'Home',
       isOnline: json['isOnline'] == true || (json['status']?.toString().toLowerCase() == 'online'),
       tdsPpm: parseNullableInt(json['tdsPpm'] ?? json['tds2'] ?? json['outletTds']) ?? 0,
