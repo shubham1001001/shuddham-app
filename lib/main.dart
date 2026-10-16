@@ -10,6 +10,10 @@ import 'features/bookings/presentation/screens/bookings_screen.dart';
 import 'features/profile/presentation/screens/profile_screen.dart';
 import 'core/session/user_session.dart';
 
+import 'package:provider/provider.dart';
+import 'features/home/presentation/providers/device_provider.dart';
+import 'features/services/presentation/providers/services_provider.dart';
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setPreferredOrientations([
@@ -22,7 +26,16 @@ Future<void> main() async {
     AppLogger.bleAdapterState(state);
   });
 
-  runApp(const ShuddhamApp());
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: UserSession()),
+        ChangeNotifierProvider(create: (_) => DeviceProvider()),
+        ChangeNotifierProvider(create: (_) => ServicesProvider()),
+      ],
+      child: const ShuddhamApp(),
+    ),
+  );
 }
 
 class ShuddhamApp extends StatelessWidget {

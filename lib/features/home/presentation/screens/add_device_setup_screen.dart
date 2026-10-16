@@ -7,6 +7,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../../../core/services/device_storage_service.dart';
 import '../../../../core/services/provisioning_service.dart';
 import '../../../../core/services/telemetry_service.dart';
+import '../../../../core/session/user_session.dart';
 import '../../data/models/device_model.dart';
 
 // Brand Design Palette from Shuddham Design System
@@ -520,6 +521,26 @@ class _AddDeviceSetupScreenState extends State<AddDeviceSetupScreen> with Ticker
     );
 
     await DeviceStorageService.saveOrUpdateDevice(newDevice);
+
+    // Automatically claim/bind this newly paired purifier on backend cloud
+    try {
+      final user = UserSession();
+      TelemetryService.instance.claimDevice(
+        serialNumber: newDevice.serialNumber,
+        deviceName: newDevice.name,
+        location: newDevice.location,
+        phone: user.rawPhone,
+        email: user.email,
+        customerId: user.currentUser?.id,
+        customerName: user.userName,
+      ).catchError((err) {
+        debugPrint('[Setup] Background claim notice: $err');
+        return false;
+      });
+    } catch (e) {
+      debugPrint('[Setup] Device claim invocation error: $e');
+    }
+
     widget.onDeviceAdded(newDevice);
     if (mounted) {
       Navigator.of(context).pop();

@@ -143,6 +143,59 @@ class TelemetryService {
     }
   }
 
+  /// Self-claim or pair a purifier to customer's account in cloud backend
+  Future<bool> claimDevice({
+    required String serialNumber,
+    String? deviceName,
+    String? location,
+    String? token,
+    String? phone,
+    String? email,
+    String? customerId,
+    String? customerName,
+  }) async {
+    HttpClient? client;
+    try {
+      client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      final uri = Uri.parse('${ApiEndpoints.liveBaseUrl}/customer/devices/claim');
+      final request = await client.postUrl(uri);
+      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+
+      final session = UserSession();
+      final jwt = token ?? session.token;
+      if (jwt.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $jwt');
+      }
+
+      final payload = {
+        'serialNumber': serialNumber,
+        if (deviceName != null && deviceName.isNotEmpty) 'deviceName': deviceName,
+        if (location != null && location.isNotEmpty) 'location': location,
+        'phone': phone ?? session.rawPhone,
+        if (email != null && email.isNotEmpty) 'email': email else if (session.email.isNotEmpty) 'email': session.email,
+        if (customerId != null && customerId.isNotEmpty) 'customerId': customerId else if (session.currentUser?.id != null) 'customerId': session.currentUser!.id,
+        if (customerName != null && customerName.isNotEmpty) 'customerName': customerName else if (session.userName.isNotEmpty) 'customerName': session.userName,
+      };
+
+      request.write(jsonEncode(payload));
+      final response = await request.close().timeout(const Duration(seconds: 10));
+
+      final success = response.statusCode == 200 || response.statusCode == 201;
+      if (success) {
+        debugPrint('[Telemetry] Purifier $serialNumber claimed successfully on backend.');
+      } else {
+        debugPrint('[Telemetry] Claim notice: HTTP ${response.statusCode}');
+      }
+      return success;
+    } catch (e) {
+      debugPrint('[Telemetry] Failed to claim device: $e');
+      return false;
+    } finally {
+      client?.close(force: true);
+    }
+  }
+
   static String? _lastLoggedSource;
   static final Map<String, String> _lastLoggedSignatures = {};
   static DateTime? _lastFullLogTime;

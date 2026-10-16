@@ -8,6 +8,13 @@
 	<string>Bluetooth is used to set up your Shuddham purifier’s Wi-Fi network.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Bluetooth is used to communicate with your Shuddham purifier.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Location access is needed to detect and pair nearby Shuddham purifiers via Bluetooth.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

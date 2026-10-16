@@ -172,23 +172,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               });
             }
           } else {
-            // Backend explicitly confirmed: ZERO hardware assigned to this user!
-            // Clean local storage so hardware is NEVER shown to another user!
-            AppLogger.dataSourceLoaded(
-              source: "🌐 LIVE CLOUD REST API",
-              dataType: "Customer Assigned Purifiers",
-              count: 0,
-              endpoint: "${ApiEndpoints.liveBaseUrl}/customer/devices",
-              details: "Zero purifiers assigned to customer ($userPhone / $userId). Cleared local storage for this user.",
-            );
-
-            await DeviceStorageService.saveDevices([], userKey: userKey, allowEmpty: true);
-            if (mounted) {
-              setState(() {
-                _devices.clear();
-                _selectedDeviceIndex = 0;
-                _isLoading = false;
-              });
+            // Backend returned 0 assigned devices from cloud.
+            // If user has locally paired devices, PRESERVE them and sync/claim to cloud!
+            if (_devices.isNotEmpty) {
+              AppLogger.dataSourceLoaded(
+                source: "💾 LOCAL STORAGE (PRESERVED & CLAIMING)",
+                dataType: "Customer Paired Purifiers",
+                count: _devices.length,
+                endpoint: "${ApiEndpoints.liveBaseUrl}/customer/devices",
+                details: "Cloud returned 0 assigned devices, but user has ${_devices.length} locally paired purifier(s). Auto-syncing to cloud.",
+              );
+              // Auto-claim locally paired purifiers on backend cloud
+              for (final dev in _devices) {
+                TelemetryService.instance.claimDevice(
+                  serialNumber: dev.serialNumber,
+                  deviceName: dev.name,
+                  location: dev.location,
+                  phone: userPhone,
+                  email: userEmail,
+                  customerId: userId,
+                  customerName: UserSession().userName,
+                ).catchError((_) => false);
+              }
+              if (mounted) {
+                setState(() => _isLoading = false);
+              }
+            } else {
+              // Clean local storage when user has no devices locally either
+              await DeviceStorageService.saveDevices([], userKey: userKey, allowEmpty: true);
+              if (mounted) {
+                setState(() {
+                  _devices.clear();
+                  _selectedDeviceIndex = 0;
+                  _isLoading = false;
+                });
+              }
             }
           }
         } else {
