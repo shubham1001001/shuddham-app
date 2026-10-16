@@ -538,69 +538,114 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // 2. Show friendly guidance dialog immediately
       showDialog(
         context: context,
-        builder: (ctx) => AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 20),
-          title: Row(
-            children: const [
-              Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 28),
-              SizedBox(width: 10),
-              Expanded(
-                child: Text(
+        barrierDismissible: true,
+        builder: (ctx) => Dialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          elevation: 10,
+          backgroundColor: Colors.white,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 26, 22, 22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Icon Header with soft emerald ring
+                Container(
+                  width: 58,
+                  height: 58,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFECFDF5),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: const Color(0xFFA7F3D0), width: 1.5),
+                  ),
+                  child: const Center(
+                    child: Icon(Icons.check_circle_rounded, color: Color(0xFF10B981), size: 32),
+                  ),
+                ),
+                const SizedBox(height: 16),
+
+                // Title
+                const Text(
                   'Device Unpaired',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+                  style: TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF0F172A),
+                    letterSpacing: -0.3,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '"${device.name}" has been removed from your app.',
-                style: const TextStyle(fontSize: 14, color: AppTheme.textDark, fontWeight: FontWeight.w500),
-              ),
-              const SizedBox(height: 14),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF0FDF4),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: const Color(0xFFBBF7D0)),
+                const SizedBox(height: 8),
+
+                // Subtitle
+                Text(
+                  '"${device.name}" has been disconnected and removed from your app.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    color: Color(0xFF64748B),
+                    height: 1.4,
+                  ),
                 ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Icon(Icons.tips_and_updates_outlined, color: Color(0xFF059669), size: 20),
-                    SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'To pair again or connect to a new Wi-Fi, press & hold the physical button on your purifier for 5 seconds to enter Pairing Mode.',
-                        style: TextStyle(fontSize: 12.5, color: Color(0xFF065F46), height: 1.35),
+                const SizedBox(height: 18),
+
+                // Clean Guidance Card
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE2E8F0)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEFF6FF),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(Icons.wifi_protected_setup_rounded, color: Color(0xFF2563EB), size: 18),
                       ),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Text(
+                          'To connect again or switch Wi-Fi, press & hold the purifier button for 5 seconds to enter Pairing Mode.',
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            color: Color(0xFF334155),
+                            height: 1.4,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 22),
+
+                // Got It Button
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.royalBlue,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                     ),
-                  ],
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text(
+                      'Got It',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15, letterSpacing: 0.2),
+                    ),
+                  ),
                 ),
-              ),
-            ],
-          ),
-          actions: [
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.royalBlue,
-                  foregroundColor: Colors.white,
-                  elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                ),
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('Got It', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-              ),
+              ],
             ),
-          ],
+          ),
         ),
       );
     }
