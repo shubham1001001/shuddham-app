@@ -81,8 +81,20 @@ class WaterReportsSheet extends StatelessWidget {
           IconButton(
             icon: const Icon(Icons.download_rounded, color: AppTheme.royalBlue),
             onPressed: () {
+              Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Downloading report...')),
+                SnackBar(
+                  content: const Row(
+                    children: [
+                      Icon(Icons.download_done_rounded, color: Colors.white, size: 20),
+                      SizedBox(width: 8),
+                      Text('Water quality report downloaded!'),
+                    ],
+                  ),
+                  backgroundColor: AppTheme.royalBlue,
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                ),
               );
             },
           ),

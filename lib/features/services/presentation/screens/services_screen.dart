@@ -5,7 +5,6 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/app_logger.dart';
 import '../../../../core/utils/app_toast.dart';
 import '../../data/datasources/services_remote_data_source.dart';
-import '../../data/models/water_service_model.dart';
 import '../../domain/entities/water_service_entity.dart';
 import '../widgets/service_card.dart';
 import '../widgets/service_category_chips.dart';
@@ -29,57 +28,13 @@ class _ServicesScreenState extends State<ServicesScreen> {
   final TextEditingController _searchController = TextEditingController();
 
   bool _isLoading = true;
+  bool _isOffline = false;
+  String? _offlineErrorMessage;
   String _selectedCategory = 'All';
   String _searchQuery = '';
   List<WaterServiceEntity> _services = [];
 
-  // Robust baseline services in case backend is unreachable during offline tests
-  static final List<WaterServiceEntity> _defaultServices = [
-    const WaterServiceModel(
-      id: 'srv-ro-complete-service',
-      title: 'RO Complete Service',
-      category: 'Purifier Maintenance',
-      price: 499,
-      duration: '1 Hour',
-      desc: 'Complete RO checkup including sediment flush, pre-carbon inspection, leak tests, and precision digital TDS calibration.',
-      featured: true,
-      rating: 4.8,
-      reviewCount: 284,
-    ),
-    const WaterServiceModel(
-      id: 'srv-filter-cartridge-swap',
-      title: 'Filter Cartridge Replacement',
-      category: 'Filter Replacement',
-      price: 799,
-      duration: '45 Mins',
-      desc: 'Replacement of spun polypropylene sediment filter and activated carbon block filter for clear, odorless water.',
-      featured: true,
-      rating: 4.8,
-      reviewCount: 119,
-    ),
-    const WaterServiceModel(
-      id: 'srv-membrane-change',
-      title: 'Membrane Change',
-      category: 'Filter Replacement',
-      price: 1899,
-      duration: '45 Mins',
-      desc: 'Genuine high-rejection 80 GPD / 100 GPD RO membrane replacement suitable for input TDS up to 2500 ppm.',
-      featured: false,
-      rating: 4.9,
-      reviewCount: 98,
-    ),
-    const WaterServiceModel(
-      id: 'srv-tds-water-test',
-      title: 'TDS Water Test',
-      category: 'Water Quality Check',
-      price: 299,
-      duration: '30 Mins',
-      desc: 'On-site 8-point lab check including TDS, pH, hardness, chlorine, and heavy mineral presence by certified water technician.',
-      featured: false,
-      rating: 4.7,
-      reviewCount: 76,
-    ),
-  ];
+
 
   @override
   void initState() {
@@ -95,18 +50,19 @@ class _ServicesScreenState extends State<ServicesScreen> {
 
   Future<void> _fetchLiveServices() async {
     if (!mounted) return;
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _isOffline = false;
+      _offlineErrorMessage = null;
+    });
 
     try {
       final liveList = await _remoteDataSource.getServices();
       if (mounted) {
         setState(() {
-          if (liveList.isNotEmpty) {
-            _services = liveList;
-          } else {
-            _services = _defaultServices;
-          }
+          _services = liveList;
           _isLoading = false;
+          _isOffline = false;
         });
 
         AppLogger.dataSourceLoaded(
@@ -121,15 +77,17 @@ class _ServicesScreenState extends State<ServicesScreen> {
       debugPrint('[ServicesScreen] Error fetching live services: $e');
       if (mounted) {
         setState(() {
-          _services = _defaultServices;
+          _isOffline = true;
+          _services = [];
           _isLoading = false;
+          _offlineErrorMessage = 'Please check your Wi-Fi or mobile data connection and try again to view available water purifier services.';
         });
 
         AppLogger.dataSourceLoaded(
-          source: "💾 OFFLINE FALLBACK CATALOG",
+          source: "🔴 NO INTERNET CONNECTION",
           dataType: "Water Solution Services Catalog",
-          count: _services.length,
-          details: "Network notice ($e). Loaded baseline services catalog.",
+          count: 0,
+          details: "No internet connection ($e). Showing No Internet UI.",
         );
       }
     }
@@ -376,74 +334,88 @@ class _ServicesScreenState extends State<ServicesScreen> {
       body: RefreshIndicator(
         onRefresh: _fetchLiveServices,
         color: AppTheme.royalBlue,
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-          physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
-          children: [
-            // ── Single Prominent Coming Soon Hero Banner ────────────────
-            _buildSingleComingSoonHero(),
-            const SizedBox(height: 16),
+        child: _isOffline && _services.isEmpty
+            ? SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                child: SizedBox(
+                  height: MediaQuery.of(context).size.height * 0.75,
+                  child: _buildNoInternetView(),
+                ),
+              )
+            : ListView(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                children: [
+                  // ── Offline Warning Banner (if showing cached services) ─────
+                  if (_isOffline && _services.isNotEmpty) ...[
+                    _buildOfflineWarningBanner(),
+                    const SizedBox(height: 14),
+                  ],
 
-            // Search Bar
-            Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFFCBD5E1)),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF0F172A).withValues(alpha: 0.03),
-                    blurRadius: 10,
-                    offset: const Offset(0, 2),
+                  // ── Single Prominent Coming Soon Hero Banner ────────────────
+                  _buildSingleComingSoonHero(),
+                  const SizedBox(height: 16),
+
+                  // Search Bar
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFFCBD5E1)),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFF0F172A).withValues(alpha: 0.03),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: TextField(
+                      controller: _searchController,
+                      onChanged: (val) => setState(() => _searchQuery = val.trim()),
+                      style: const TextStyle(fontSize: 13.5, color: Color(0xFF1E293B)),
+                      decoration: InputDecoration(
+                        hintText: 'Search purifier services, filters, TDS tests...',
+                        hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
+                        prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF64748B), size: 20),
+                        suffixIcon: _searchQuery.isNotEmpty
+                            ? IconButton(
+                                icon: const Icon(Icons.clear_rounded, size: 18, color: Color(0xFF94A3B8)),
+                                onPressed: () {
+                                  _searchController.clear();
+                                  setState(() => _searchQuery = '');
+                                },
+                              )
+                            : null,
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+                      ),
+                    ),
                   ),
+                  const SizedBox(height: 12),
+
+                  // Category Filter Chips
+                  ServiceCategoryChips(
+                    categories: _categories,
+                    selectedCategory: _selectedCategory,
+                    onCategorySelected: (cat) => setState(() => _selectedCategory = cat),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Loading state or List
+                  if (_isLoading)
+                    _buildShimmerLoader()
+                  else if (filtered.isEmpty)
+                    _buildEmptySearchResults()
+                  else
+                    ...filtered.map((service) {
+                      return ServiceCard(
+                        service: service,
+                        onBookNow: () => _showServicePreview(service),
+                      );
+                    }),
                 ],
               ),
-              child: TextField(
-                controller: _searchController,
-                onChanged: (val) => setState(() => _searchQuery = val.trim()),
-                style: const TextStyle(fontSize: 13.5, color: Color(0xFF1E293B)),
-                decoration: InputDecoration(
-                  hintText: 'Search purifier services, filters, TDS tests...',
-                  hintStyle: const TextStyle(color: Color(0xFF94A3B8), fontSize: 13),
-                  prefixIcon: const Icon(Icons.search_rounded, color: Color(0xFF64748B), size: 20),
-                  suffixIcon: _searchQuery.isNotEmpty
-                      ? IconButton(
-                          icon: const Icon(Icons.clear_rounded, size: 18, color: Color(0xFF94A3B8)),
-                          onPressed: () {
-                            _searchController.clear();
-                            setState(() => _searchQuery = '');
-                          },
-                        )
-                      : null,
-                  border: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Category Filter Chips
-            ServiceCategoryChips(
-              categories: _categories,
-              selectedCategory: _selectedCategory,
-              onCategorySelected: (cat) => setState(() => _selectedCategory = cat),
-            ),
-            const SizedBox(height: 16),
-
-            // Loading state or List
-            if (_isLoading)
-              _buildShimmerLoader()
-            else if (filtered.isEmpty)
-              _buildEmptySearchResults()
-            else
-              ...filtered.map((service) {
-                return ServiceCard(
-                  service: service,
-                  onBookNow: () => _showServicePreview(service),
-                );
-              }),
-          ],
-        ),
       ),
     );
   }
@@ -650,6 +622,131 @@ class _ServicesScreenState extends State<ServicesScreen> {
           ),
         );
       }),
+    );
+  }
+
+  Widget _buildNoInternetView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 48),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 104,
+              height: 104,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEF4444).withValues(alpha: 0.08),
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: const Color(0xFFEF4444).withValues(alpha: 0.2),
+                  width: 2,
+                ),
+              ),
+              child: Center(
+                child: Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEF4444).withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.wifi_off_rounded,
+                    size: 36,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'No Internet Connection',
+              style: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF0F172A),
+                letterSpacing: -0.3,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _offlineErrorMessage ??
+                  'Please check your Wi-Fi or mobile data connection and try again to view available water purifier services.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 14,
+                color: Color(0xFF64748B),
+                height: 1.45,
+              ),
+            ),
+            const SizedBox(height: 28),
+            SizedBox(
+              height: 48,
+              child: ElevatedButton.icon(
+                onPressed: _fetchLiveServices,
+                icon: const Icon(Icons.refresh_rounded, size: 20, color: Colors.white),
+                label: const Text(
+                  'Try Again',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.white),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppTheme.royalBlue,
+                  foregroundColor: Colors.white,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 26),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildOfflineWarningBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF3C7),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.wifi_off_rounded, size: 18, color: Color(0xFFD97706)),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'No internet connection. Showing offline services.',
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF92400E),
+              ),
+            ),
+          ),
+          TextButton(
+            onPressed: _fetchLiveServices,
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            child: const Text(
+              'Retry',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFFB45309),
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

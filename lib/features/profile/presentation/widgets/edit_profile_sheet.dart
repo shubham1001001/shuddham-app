@@ -46,6 +46,8 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
   bool _isLoading = false;
   String? _nameError;
   String? _phoneError;
+  String? _emailError;
+  String? _generalError;
 
   @override
   void initState() {
@@ -68,6 +70,17 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     super.dispose();
   }
 
+  void _clearErrors() {
+    if (_generalError != null || _nameError != null || _phoneError != null || _emailError != null) {
+      setState(() {
+        _generalError = null;
+        _nameError = null;
+        _phoneError = null;
+        _emailError = null;
+      });
+    }
+  }
+
   Future<void> _handleSave() async {
     final newName = _nameController.text.trim();
     final newPhone = UserSession.extract10Digits(_phoneController.text.trim());
@@ -76,15 +89,29 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
     setState(() {
       _nameError = null;
       _phoneError = null;
+      _emailError = null;
+      _generalError = null;
     });
 
+    bool hasValidationError = false;
+
     if (newName.isEmpty) {
-      setState(() => _nameError = 'Please enter a valid name');
-      return;
+      _nameError = 'Please enter a valid name';
+      hasValidationError = true;
     }
 
     if (newPhone.isNotEmpty && newPhone.length != 10) {
-      setState(() => _phoneError = 'Mobile number must be exactly 10 digits');
+      _phoneError = 'Mobile number must be exactly 10 digits';
+      hasValidationError = true;
+    }
+
+    if (newEmail.isNotEmpty && (!newEmail.contains('@') || !newEmail.contains('.'))) {
+      _emailError = 'Please enter a valid email address';
+      hasValidationError = true;
+    }
+
+    if (hasValidationError) {
+      setState(() {});
       return;
     }
 
@@ -121,7 +148,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
           SnackBar(
             content: const Row(
               children: [
-                Icon(Icons.check_circle, color: Colors.white),
+                Icon(Icons.check_circle_rounded, color: Colors.white, size: 20),
                 SizedBox(width: 8),
                 Text('Profile updated successfully!'),
               ],
@@ -134,13 +161,17 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(e.toString().replaceAll('Exception: ', '')),
-            backgroundColor: Colors.red,
-          ),
-        );
+        String msg = e
+            .toString()
+            .replaceFirst(RegExp(r'^(Exception|ApiException):\s*'), '')
+            .trim();
+        if (msg.isEmpty) {
+          msg = 'Unable to update profile. Please check your connection and try again.';
+        }
+        setState(() {
+          _isLoading = false;
+          _generalError = msg;
+        });
       }
     }
   }
@@ -188,9 +219,51 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
                 ),
               ],
             ),
+
+            // In-Sheet Error Alert Banner (Never hidden behind modal)
+            if (_generalError != null) ...[
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFEF2F2),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFCA5A5)),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 1),
+                      child: Icon(Icons.error_outline_rounded, color: Color(0xFFDC2626), size: 18),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _generalError!,
+                        style: const TextStyle(
+                          color: Color(0xFFB91C1C),
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          height: 1.35,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: () => setState(() => _generalError = null),
+                      child: const Icon(Icons.close_rounded, color: Color(0xFFDC2626), size: 18),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
             const SizedBox(height: 16),
             TextField(
               controller: _nameController,
+              onChanged: (_) => _clearErrors(),
               decoration: InputDecoration(
                 labelText: 'Full Name *',
                 errorText: _nameError,
@@ -202,6 +275,7 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
             TextField(
               controller: _phoneController,
               keyboardType: TextInputType.phone,
+              onChanged: (_) => _clearErrors(),
               inputFormatters: [
                 FilteringTextInputFormatter.digitsOnly,
                 LengthLimitingTextInputFormatter(10),
@@ -218,8 +292,10 @@ class _EditProfileSheetState extends State<EditProfileSheet> {
             TextField(
               controller: _emailController,
               keyboardType: TextInputType.emailAddress,
+              onChanged: (_) => _clearErrors(),
               decoration: InputDecoration(
                 labelText: 'Email Address',
+                errorText: _emailError,
                 prefixIcon: const Icon(Icons.email_outlined, color: AppTheme.royalBlue),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),

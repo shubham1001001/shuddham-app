@@ -161,9 +161,20 @@ class _BookServiceSheetState extends State<BookServiceSheet> {
       }
     } catch (e) {
       if (mounted) {
+        final errStr = e.toString().toLowerCase();
+        String errorText;
+        if (errStr.contains('socketexception') ||
+            errStr.contains('network') ||
+            errStr.contains('clientexception') ||
+            errStr.contains('connection refused') ||
+            errStr.contains('failed host lookup')) {
+          errorText = 'No internet connection. Please check your network and try again.';
+        } else {
+          errorText = e.toString().replaceFirst(RegExp(r'^(Exception|ApiException):\s*'), '');
+        }
         setState(() {
           _isBooking = false;
-          _formError = 'Booking failed: $e';
+          _formError = errorText;
         });
       }
     }
